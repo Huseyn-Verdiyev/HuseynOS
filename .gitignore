@@ -1,0 +1,19 @@
+# Compiled Rust files
+target/
+**/*.rs.bk
+
+# Build artifacts and tools
+build/
+*.iso
+*.img
+
+# Limine bootloader binaries (downloaded automatically)
+limine/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# IDEs
+.vscode/
+.idea/

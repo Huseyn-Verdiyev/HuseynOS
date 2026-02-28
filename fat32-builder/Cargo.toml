@@ -1,0 +1,10 @@
+[package]
+name = "fat32-builder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fatfs = "0.3"
+fscommon = "0.1"
+
+[workspace]

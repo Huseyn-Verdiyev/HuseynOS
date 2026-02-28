@@ -1,0 +1,23 @@
+===========================================
+  HuseynOS v0.4.0 - CLI & Drivers
+  Architecture: x86_64
+===========================================
+
+[OK] GDT initialized
+[OK] PIC remapped (IRQs 32-47)
+[OK] PIT initialized to 1000 Hz
+[OK] IDT initialized (256 entries + syscall 0x80)
+[FAT] Found 1 boot modules.
+[FAT] Mounted filesystem image (1474560 bytes)
+[FAT] Volume: "HUSEYNFS", Type: "FAT12"
+[OK] Frame allocator: 31163 free frames (121 MiB usable RAM)
+[OK] Frame allocator active
+[OK] Paging initialized (HHDM offset: 0xFFFF800000000000)
+[OK] Heap initialized: 1024 KiB at 0xFFFFC00000000000
+[OK] Heap initialized
+[OK] Keyboard initialized
+[OK] Scheduler initialized
+[OK] Spawned Shell Task (PID 1)
+[Shell] Started!
+root@huseynos:~$ [OK] Interrupts enabled - OS ready!
+

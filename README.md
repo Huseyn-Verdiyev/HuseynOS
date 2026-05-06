@@ -10,7 +10,10 @@
 
 **HuseynOS** is an independent, educational operating system built from the ground up in **Rust**. Operating strictly in `x86_64` Long Mode, it eschews monolithic design in favor of a **pure microkernel architecture**. By pushing device drivers, filesystems, and the graphical compositor into fully isolated Userland (Ring 3) processes, HuseynOS achieves high fault tolerance and modularity, relying on a robust **Inter-Process Communication (IPC)** mechanism for system orchestration.
 
-This project was developed not by assembling existing libraries, but by writing the core foundational layers—from the IDT and GDT to the physical page frame allocator and custom ELF loaders—completely from scratch.
+### 🛑 Zero Dependencies, 100% From Scratch
+This project was developed **without assembling existing libraries or copying from pre-built OS templates**. 
+- **No Standard Library:** Written entirely with `#![no_std]` and `#![no_main]`. There is no `printf`, no `malloc`, and no standard OS abstractions available.
+- **Custom Foundation:** Every core foundational layer—from parsing the Multiboot/Limine memory maps, configuring the Global Descriptor Table (GDT), writing the Interrupt Service Routines (ISRs), to creating a custom Physical Page Frame Allocator and ELF binary loader—was architected and coded **completely from scratch**.
 
 ## 🚀 Architectural Highlights
 

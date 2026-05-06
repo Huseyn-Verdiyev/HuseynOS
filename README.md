@@ -1,141 +1,90 @@
-# HuseynOS
-🦀 A 64-bit microkernel OS built from scratch in Rust by Huseyn Verdiyev. Features preemptive multitasking, Limine bootloader, and a custom FAT12 ramdisk.
-
-HuseynOS is a 64-bit operating system built from scratch in **Rust** by Huseyn Verdiyev 🦀.
-It features a custom bootloader setup (Limine), a microkernel architecture, preemptive multitasking, and a custom FAT12 ramdisk filesystem. 
-
-This project is an educational journey into operating system development, demonstrating modern bare-metal programming techniques using Rust's safety guarantees and zero-cost abstractions.
+<div align="center">
+  <h1>🛡️ HuseynOS</h1>
+  <p><strong>A Modern, Formally-Inspired 64-bit Microkernel Operating System Written in Rust</strong></p>
+  <p><i>Developed entirely from scratch to demonstrate advanced systems programming, bare-metal architecture, and the power of memory-safe abstractions.</i></p>
+</div>
 
 ---
 
-## ✨ Features (v0.5.0)
+## 📌 Executive Summary
 
-Current capabilities of HuseynOS include:
+**HuseynOS** is an independent, educational operating system built from the ground up in **Rust**. Operating strictly in `x86_64` Long Mode, it eschews monolithic design in favor of a **pure microkernel architecture**. By pushing device drivers, filesystems, and the graphical compositor into fully isolated Userland (Ring 3) processes, HuseynOS achieves high fault tolerance and modularity, relying on a robust **Inter-Process Communication (IPC)** mechanism for system orchestration.
 
-- 🛡️ **64-bit Architecture**: Fully operates in x86_64 Long Mode.
-- 🥾 **Limine Bootloader**: Modern, reliable booting adhering to the Limine Boot Protocol with Higher Half Direct Mapping (HHDM).
-- 🧠 **Memory Management**: 
-  - Physical Page Frame Allocator (Bitmap based).
-  - Virtual Memory Paging (4-level page tables).
-  - Kernel Heap Allocator (`linked_list_allocator`).
-- ⏱️ **Interrupts & Hardware**:
-  - Global Descriptor Table (GDT) & Task State Segment (TSS).
-  - Interrupt Descriptor Table (IDT).
-  - PIC Remapping & Exception Handling (Double Faults, Page Faults, etc).
-  - Programmable Interval Timer (PIT) configured at 1000 Hz.
-  - Real-Time Clock (RTC) reading from CMOS.
-- 🔄 **Preemptive Multitasking**:
-  - Timer-driven (IRQ0) context switching.
-  - Process structures with dedicated kernel stacks.
-  - Safe state saving/restoring via hardware interrupt frames.
-  - System Calls (`int 0x80`) including `yield`.
-- ⌨️ **Input & Output**:
-  - PS/2 Keyboard driver with scancode translation, Shift, and CapsLock support.
-  - VGA Framebuffer console output (using Limine's provided framebuffer) with custom 8x16 font rendering and scrolling.
-  - Serial port (COM1) debugging output.
-- 📁 **Filesystem (FAT12)**:
-  - Custom FAT12 parser reading directly from a Limine Boot Module mapped in RAM.
-  - Support for `ls` (directory listing) and `cat` (file reading).
-- 💻 **Interactive Shell**:
-  - Built-in `root@huseynos:~$` CLI.
-  - Available commands: `help`, `info`, `clear`, `date`, `ls`, `cat`.
+This project was developed not by assembling existing libraries, but by writing the core foundational layers—from the IDT and GDT to the physical page frame allocator and custom ELF loaders—completely from scratch.
 
----
+## 🚀 Architectural Highlights
 
-## 🏗️ Project Structure
+### 1. Pure Microkernel & IPC Design
+Unlike Linux or Windows, the HuseynOS kernel does virtually no high-level processing. Its sole responsibilities are:
+- **Memory Management** (Hardware paging, TLB, Page Frame allocation)
+- **Task Scheduling** (Timer-driven preemptive context switching)
+- **Inter-Process Communication (IPC)**
+
+Everything else—the PS/2 Keyboard/Mouse drivers, the Console, the Graphical Compositor, and the Terminal—runs in isolated Ring 3 Userland processes. If the mouse driver crashes, the system survives. They communicate via a strict, synchronous message-passing IPC system using hardware interrupts (`int 0x80`).
+
+### 2. Preemptive Multitasking & Ring 3 Userland
+- **Hardware-driven Context Switching:** Utilizes the Programmable Interval Timer (PIT) bound to IRQ0 to forcefully interrupt processes, saving their CPU registers onto a dedicated kernel stack, and jumping to the next task in the queue.
+- **Privilege Separation:** Processes are stripped of kernel privileges, operating in Ring 3 with localized Virtual Address Spaces. 
+- **Custom ELF Loader:** The kernel parses Executable and Linkable Format (ELF) binaries dynamically, mapping their segments into virtual memory at runtime before execution.
+
+### 3. Advanced Memory Management
+- **Demand Paging:** Implements a 4-level page table architecture (`PML4 -> PDPT -> PD -> PT`).
+- **Physical Memory:** A custom Bitmap-based Physical Page Frame Allocator manages available RAM retrieved from the bootloader's memory map.
+- **Kernel Heap:** Implements a `linked_list_allocator` for dynamic data structures (Vectors, Strings) within the kernel's strictly typed boundary.
+
+### 4. Custom Server-Side Graphical Compositor
+HuseynOS features a fully functional Desktop Environment:
+- **Server-Side Window Decoration:** The Compositor process handles all window borders, title bars, and close buttons. Applications just render their client area.
+- **Zero-Tearing Double Buffering:** The screen is rendered to a background buffer cache (pre-calculating gradients and static assets via `memcpy`) before a single fast `blit` to the physical framebuffer.
+- **Z-Order & Event Routing:** Dynamic window layering and coordinate-based event routing (mouse clicks, dragging) via the IPC subsystem.
+
+## 🧠 Technical Stack & Methodologies
+
+* **Language:** Rust (`#![no_std]`, `#![no_main]`)
+* **Bootloader:** Limine Boot Protocol (Higher Half Direct Mapping)
+* **Executable Format:** ELF64
+* **Filesystem:** Custom FAT12 parser running over a RAM-disk implementation.
+* **Build System:** A custom Python automation pipeline that compiles userland binaries, injects them into a FAT12 image, links the kernel, and packages a bootable `.iso`.
+
+## 📂 Source Code Topology
 
 ```text
 HuseynOS/
-├── build.py           # Python build & automation script
-├── limine.conf        # Limine bootloader configuration
-├── make_fat.py        # Pure-Python script to generate the FAT12 fs.img
-├── fsroot/            # Contents injected into the FAT12 filesystem image
-│   └── hello.txt      # Example text file
-├── kernel/            # The Rust microkernel source code
-│   ├── Cargo.toml
-│   ├── linker.ld      # Linker script for memory layout
-│   └── src/
-│       ├── main.rs    # Kernel entry point
-│       ├── console.rs # Framebuffer graphics & text rendering
-│       ├── idt.rs     # Interrupts & Exception handling
-│       ├── process.rs # Process management & context structs
-│       ├── scheduler.rs # Preemptive task scheduling 
-│       ├── fat32.rs   # FAT12/16/32 filesystem parser
-│       ├── shell.rs   # Interactive command line interface
-│       ├── keyboard.rs# PS/2 scancode translator
-│       ├── serial.rs  # COM1 logging
-│       ├── pit.rs     # Programmable Interval Timer (1000Hz)
-│       └── rtc.rs     # CMOS Date & Time
+├── kernel/             # The Core Microkernel (Ring 0)
+│   ├── src/memory/     # Paging, Frame Allocation, Heap
+│   ├── src/process/    # Context Switching, Scheduler, ELF Loading
+│   ├── src/ipc.rs      # Message-passing mechanisms
+│   └── src/idt.rs      # Interrupt Descriptor Table & ISRs
+├── userland/           # Isolated Processes (Ring 3)
+│   ├── compositor/     # The GUI Window Manager
+│   ├── terminal/       # CLI Interface & App
+│   ├── init/           # PID 1 - System initialization and process spawning
+│   ├── mouse_driver/   # PS/2 Mouse Controller
+│   └── keyboard_driver/# PS/2 Keyboard Controller
+├── libhuseyn/          # Standard Library alternative for HuseynOS applications
+│   └── src/ipc.rs      # Syscall wrappers
+└── build.py            # Automated build, image generation, and QEMU orchestration
 ```
 
----
+## 🛠️ Build & Run Instructions
 
-## 🛠️ Build Instructions
+**Prerequisites:** Rust Nightly, Python 3, QEMU, Git.
 
-### Prerequisites
-
-You need the following installed on your system (tested on Windows):
-1. **[Rust](https://rustup.rs/)** (Nightly channel)
-2. **[Python 3](https://www.python.org/downloads/)**
-3. **[QEMU](https://www.qemu.org/download/)** (Added to your system `PATH`)
-4. **Git** bash/tools (optional but recommended)
-
-Set your default Rust toolchain to nightly and install the required components:
 ```bash
+# 1. Setup Rust toolchain
 rustup default nightly
 rustup component add rust-src
 rustup target add x86_64-unknown-none
-```
 
-### Compiling and Running
-
-Everything is automated via the `build.py` script. 
-
-To build the kernel, generate the FAT12 filesystem image, bundle them into a bootable ISO using Limine, and immediately launch QEMU:
-
-```bash
+# 2. Build the OS, construct the FAT12 disk, generate ISO, and launch QEMU
 python build.py run
 ```
 
-*Note: The script automatically handles downloading the Limine bootloader binaries during the first run.*
+## 🎓 Educational Value & Motivation
 
-To just build the ISO without running it:
-```bash
-python build.py iso
-```
+Building HuseynOS was an exercise in extreme low-level systems engineering. It required reading Intel Software Developer Manuals, understanding the legacy complexities of the x86 architecture, debugging Triple Faults with GDB attached to QEMU, and implementing complex algorithms (like color interpolation and Z-order sorting) without the safety net of an underlying operating system or standard library.
 
-To clean the build artifacts:
-```bash
-python build.py clean
-```
+It stands as a testament to the viability of Rust in OS development, leveraging Ownership, Lifetimes, and safe abstractions to eliminate entire classes of memory bugs (buffer overflows, use-after-free) at the kernel level.
 
 ---
-
-## 🎮 Interacting with the OS
-
-Once QEMU boots up HuseynOS, you will be greeted by the interactive shell.
-
-Click inside the QEMU window to capture your keyboard, and try the following commands:
-- `help` : View available commands.
-- `info` : View OS architecture and feature status.
-- `date` : Fetch the current hardware time using the RTC.
-- `ls` : List the files present on the injected FAT12 ramdisk.
-- `cat hello.txt` : Read the contents of a file on the disk.
-- *(Type really fast while running a command to test the preemptive multitasking!)*
-
-To release your mouse/keyboard from QEMU, press `Ctrl + Alt`.
-
----
-
-## 🗺️ Roadmap / Next Phases
-
-- [x] Phase 1: Bootloader & Screen (Limine + Framebuffer)
-- [x] Phase 2: Memory (GDT, IDT, Paging, Heap)
-- [x] Phase 3: Input & Shell (PS/2 Keyboard, CLI)
-- [x] Phase 4: Cooperative Multitasking (Processes & Syscalls)
-- [x] Phase 5a: True Preemptive Multitasking & RTC & FAT12
-- [ ] Phase 5b: ELF Binary Loader & Userland (Ring 3) Transition
-- [ ] Phase 6: IPC (Inter-Process Communication) and Microkernel Driver separation
-
----
-*Built with ❤️ in Rust.*
+*Architected and engineered by Huseyn Verdiyev.*

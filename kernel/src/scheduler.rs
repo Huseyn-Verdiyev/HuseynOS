@@ -53,14 +53,43 @@ pub fn schedule(current_context_ptr: *mut InterruptContext) -> *mut InterruptCon
             }
         };
 
-        if let Some(new) = process::get_process_mut(next_pid) {
+        let next_ctx_ptr = if let Some(new) = process::get_process_mut(next_pid) {
             new.state = ProcessState::Running;
             CURRENT_PID = next_pid;
+
+            // Page Table Swapping
+            let pml4 = if new.pml4_phys != 0 {
+                new.pml4_phys
+            } else {
+                crate::memory::paging::KERNEL_PML4_PHYS
+            };
+            let current_cr3: u64;
+            core::arch::asm!("mov {}, cr3", out(reg) current_cr3);
+            if (current_cr3 & !0xFFF) != pml4 {
+                core::arch::asm!("mov cr3, {}", in(reg) pml4);
+            }
+
+            // Update TSS RSP0 to this thread's kernel stack
+            crate::gdt::set_tss_stack(new.kernel_stack_top);
+
             new.context.rsp as *mut InterruptContext
         } else {
             CURRENT_PID = 0;
+            let pml4 = crate::memory::paging::KERNEL_PML4_PHYS;
+            let current_cr3: u64;
+            core::arch::asm!("mov {}, cr3", out(reg) current_cr3);
+            if (current_cr3 & !0xFFF) != pml4 {
+                core::arch::asm!("mov cr3, {}", in(reg) pml4);
+            }
+            
+            // For idle task, we can just use the saved idle pointer + size of context
+            // though the idle task never runs in Ring 3 so it technically doesn't matter.
+            crate::gdt::set_tss_stack(IDLE_CTX_PTR + core::mem::size_of::<InterruptContext>() as u64);
+            
             IDLE_CTX_PTR as *mut InterruptContext
-        }
+        };
+
+        next_ctx_ptr
     }
 }
 
@@ -71,7 +100,7 @@ pub fn yield_now() {
     }
 }
 
-/// Block the current process.
+/// Block the current process without forcing an interrupt
 pub fn block_current() {
     unsafe {
         if CURRENT_PID != 0 {
@@ -80,7 +109,6 @@ pub fn block_current() {
             }
         }
     }
-    yield_now();
 }
 
 /// Unblock a process by PID.

@@ -138,7 +138,7 @@ pub fn init() {
             | (0x89u64 << 40) // Present, type = Available 64-bit TSS
             | (((tss_size >> 16) & 0xF) << 48)
             | (((tss_ptr >> 24) & 0xFF) << 56);
-        let tss_high: u64 = (tss_ptr >> 32) & 0xFFFFFFFF;
+        let tss_high: u64 = tss_ptr >> 32;
 
         GDT[5] = tss_low;
         GDT[6] = tss_high;
@@ -148,7 +148,6 @@ pub fn init() {
             limit: (core::mem::size_of_val(&GDT) - 1) as u16,
             base: GDT.as_ptr() as u64,
         };
-
         asm!(
             "lgdt [{}]",
             in(reg) &gdtr,
@@ -174,15 +173,23 @@ pub fn init() {
             "mov fs, {sel:x}",
             "mov gs, {sel:x}",
             "mov ss, {sel:x}",
-            sel = in(reg) KERNEL_DATA_SEL as u32,
+            sel = in(reg) KERNEL_DATA_SEL as u16,
             options(nostack, preserves_flags),
         );
 
         // Load TSS
         asm!(
-            "ltr {sel:x}",
-            sel = in(reg) TSS_SEL as u32,
-            options(nostack, preserves_flags),
+            "ltr ax",
+            in("ax") TSS_SEL,
+            options(nostack, preserves_flags)
         );
+    }
+}
+
+/// Update the TSS ring 0 stack pointer.
+/// Must be called on every context switch to ring 3.
+pub fn set_tss_stack(stack_ptr: u64) {
+    unsafe {
+        TSS.rsp[0] = stack_ptr;
     }
 }

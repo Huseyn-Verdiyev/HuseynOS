@@ -69,8 +69,8 @@ pub fn init() {
         // Restore masks (mask all except timer=IRQ0 and keyboard=IRQ1)
         let _ = mask1;
         let _ = mask2;
-        outb(PIC1_DATA, 0xFC); // Only IRQ0 (timer) and IRQ1 (keyboard) enabled
-        outb(PIC2_DATA, 0xFF); // All slave IRQs masked
+        outb(PIC1_DATA, 0xF8); // IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade to slave) enabled
+        outb(PIC2_DATA, 0xEF); // IRQ12 (mouse) enabled on slave PIC
     }
 }
 

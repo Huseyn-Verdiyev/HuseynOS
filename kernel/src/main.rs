@@ -3,22 +3,22 @@
 
 extern crate alloc;
 
-mod console;
 mod fat32;
 mod gdt;
 mod idt;
 mod ipc;
-mod keyboard;
 mod memory;
 mod pic;
 mod pit;
 mod process;
 mod rtc;
+mod elf;
 mod scheduler;
 mod serial;
-mod shell;
+mod shm;
 mod syscall;
-mod vga_font;
+mod vfs;
+mod vma;
 
 use alloc::vec;
 use core::arch::asm;
@@ -55,7 +55,7 @@ static MEMORY_MAP_REQUEST: MemoryMapRequest = MemoryMapRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
-static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
+pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 
 #[used]
 #[unsafe(link_section = ".requests")]
@@ -69,15 +69,9 @@ static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(
 unsafe extern "C" fn kmain() -> ! {
     // 1. Serial output
     serial::init();
-    // Initialize Console if framebuffer is available
-    if let Some(response) = FRAMEBUFFER_REQUEST.get_response() {
-        if let Some(fb) = response.framebuffers().next() {
-            console::CONSOLE.lock().init(&fb);
-        }
-    }
 
     println!("===========================================");
-    println!("  HuseynOS v0.4.0 - CLI & Drivers");
+    println!("  HuseynOS Beta v1.0.0 - Desktop Environment");
     println!("  Architecture: x86_64");
     println!("===========================================");
     println!();
@@ -92,14 +86,19 @@ unsafe extern "C" fn kmain() -> ! {
     gdt::init();
     println!("[OK] GDT initialized");
 
-    // 3. PIC
+    // 3. IDT (must be initialized before PIC enables IRQs!)
+    idt::init();
+    println!("[OK] IDT initialized (256 entries + syscall 0x80)");
+
+    // 4. PIC
     pic::init();
     println!("[OK] PIC remapped (IRQs 32-47)");
 
-    // 3.5. PIT (Timer at 1000 Hz for Preemption)
+    // 5. PIT (Timer at 1000 Hz for Preemption)
     pit::init(1000);
-    idt::init();
-    println!("[OK] IDT initialized (256 entries + syscall 0x80)");
+
+    // 5b. PS/2 Mouse
+    idt::init_mouse();
 
     // 4. FAT32 File System (via Ramdisk)
     fat32::init();
@@ -119,16 +118,20 @@ unsafe extern "C" fn kmain() -> ! {
     memory::heap::init();
     println!("[OK] Heap initialized");
 
-    // 7. Keyboard
-    keyboard::init();
-    println!("[OK] Keyboard initialized");
 
     // 7. Scheduler
     scheduler::init();
 
-    // 8. Spawn shell task
-    let pid_shell = process::spawn("Shell", shell::shell_task);
-    println!("[OK] Spawned Shell Task (PID {})", pid_shell);
+    // 8. Spawn init process
+    if let Some(data) = fat32::read_file("init.elf") {
+        if let Some(pid) = process::load_elf("init", &data, 0) {
+            println!("[OK] Spawned init.elf (PID {})", pid);
+        } else {
+            println!("[ERROR] Failed to load init.elf");
+        }
+    } else {
+        println!("[ERROR] init.elf not found in root directory!");
+    }
 
     // 9. Enable interrupts
     idt::enable_interrupts();

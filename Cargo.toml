@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["kernel"]
-exclude = ["fat32-builder"]
+members = ["kernel", "userland/init", "userland/shell"]
+exclude = ["fat32-builder", "userland/hello_user", "userland/libhuseyn", "userland/console_driver", "userland/keyboard_driver", "userland/mouse_driver", "userland/compositor", "userland/terminal"]

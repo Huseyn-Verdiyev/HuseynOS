@@ -2,7 +2,7 @@ use spin::Mutex;
 use uart_16550::SerialPort;
 
 /// Global serial port, protected by a spinlock.
-static SERIAL1: Mutex<Option<SerialPort>> = Mutex::new(None);
+pub static SERIAL1: Mutex<Option<SerialPort>> = Mutex::new(None);
 
 /// COM1 I/O port address.
 const COM1_PORT: u16 = 0x3F8;
@@ -48,4 +48,15 @@ macro_rules! serial_println {
         $crate::serial::write_fmt(format_args!($($arg)*));
         $crate::serial_print!("\n");
     });
+}
+
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => ($crate::serial_print!($($arg)*));
+}
+
+#[macro_export]
+macro_rules! println {
+    () => ($crate::serial_println!());
+    ($($arg:tt)*) => ($crate::serial_println!($($arg)*));
 }

@@ -9,23 +9,31 @@ const QUEUE_SIZE: usize = 16;
 pub const MSG_PAYLOAD_SIZE: usize = 64;
 
 /// An IPC message.
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct Message {
     pub sender: Pid,
-    pub payload: [u8; MSG_PAYLOAD_SIZE],
-    pub len: usize,
+    pub msg_type: u64,
+    pub arg1: u64,
+    pub arg2: u64,
+    pub arg3: u64,
+    pub arg4: u64,
+    pub arg5: u64,
+    pub arg6: u64,
 }
 
 impl Message {
-    pub fn new(sender: Pid, data: &[u8]) -> Self {
-        let mut payload = [0u8; MSG_PAYLOAD_SIZE];
-        let len = data.len().min(MSG_PAYLOAD_SIZE);
-        payload[..len].copy_from_slice(&data[..len]);
-        Self { sender, payload, len }
-    }
-
-    pub fn as_str(&self) -> &str {
-        core::str::from_utf8(&self.payload[..self.len]).unwrap_or("<invalid utf8>")
+    pub const fn empty() -> Self {
+        Self {
+            sender: 0,
+            msg_type: 0,
+            arg1: 0,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+            arg6: 0,
+        }
     }
 }
 
@@ -80,9 +88,18 @@ static IPC_QUEUES: Mutex<[MessageQueue; 64]> = {
 };
 
 /// Send a message to a target process.
-pub fn send(to_pid: Pid, data: &[u8]) -> bool {
+pub fn send(to_pid: Pid, msg_type: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64, arg6: u64) -> bool {
     let from_pid = scheduler::current_pid();
-    let msg = Message::new(from_pid, data);
+    let msg = Message {
+        sender: from_pid,
+        msg_type,
+        arg1,
+        arg2,
+        arg3,
+        arg4,
+        arg5,
+        arg6,
+    };
 
     let mut queues = IPC_QUEUES.lock();
     if to_pid == 0 || to_pid >= 64 {
@@ -109,13 +126,3 @@ pub fn try_receive() -> Option<Message> {
     }
 }
 
-/// Receive a message (blocking). Blocks until a message is available.
-pub fn receive() -> Message {
-    loop {
-        if let Some(msg) = try_receive() {
-            return msg;
-        }
-        // No message — yield (in a real system we'd block)
-        scheduler::yield_now();
-    }
-}

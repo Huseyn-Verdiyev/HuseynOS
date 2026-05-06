@@ -17,3 +17,14 @@ __pycache__/
 # IDEs
 .vscode/
 .idea/
+
+# Test and temp files
+*.py
+*.txt
+*.log
+*.png
+*.ppm
+*.dump
+fsroot/
+limine.conf
+linker.ld

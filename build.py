@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HuseynOS Build System
+HuseynOS Build System 
 =====================
 Automates: compile kernel -> prepare Limine -> create bootable ISO
 
@@ -34,17 +34,17 @@ LIMINE_DIR = BUILD_DIR / "limine"
 OUTPUT_ISO = BUILD_DIR / "huseynos.iso"
 
 CARGO_TARGET = "x86_64-unknown-none"
-KERNEL_BINARY = PROJECT_ROOT / "target" / CARGO_TARGET / "debug" / "huseynos-kernel"
+KERNEL_BINARY = PROJECT_ROOT / "target" / CARGO_TARGET / "release" / "huseynos-kernel"
 
 # Limine v8.x release
 LIMINE_REPO = "https://github.com/limine-bootloader/limine"
 LIMINE_BRANCH = "v8.x-binary"
 
 
-def run_cmd(cmd: list[str], cwd: Path = PROJECT_ROOT, check: bool = True) -> subprocess.CompletedProcess:
+def run_cmd(cmd: list[str], cwd: Path = PROJECT_ROOT, check: bool = True, env: dict | None = None) -> subprocess.CompletedProcess:
     """Run a command and stream output."""
     print(f"  > {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, cwd=cwd, check=check)
+    result = subprocess.run(cmd, cwd=cwd, check=check, env=env)
     return result
 
 
@@ -75,15 +75,13 @@ def find_tool(name: str, extra_paths: list[str] | None = None) -> str | None:
 def step_build_kernel():
     """Compile the kernel with Cargo."""
     print("\n" + "-" * 50)
-    print("  [1/4] Building kernel...")
+    print("  [1/4] Building kernel and userland...")
     print("-" * 50)
     
-    cargo = find_tool("cargo")
-    if not cargo:
-        print("  ERROR: cargo not found! Install Rust first.")
-        sys.exit(1)
-
-    run_cmd([cargo, "build", "--target", CARGO_TARGET], cwd=PROJECT_ROOT)
+    # We delegate to the PowerShell script because it sets up the correct RUSTFLAGS
+    # for each userland crate to avoid linker errors.
+    print("  Delegating build to run_tests.ps1...")
+    run_cmd(["powershell", "-ExecutionPolicy", "Bypass", "-File", "run_tests.ps1", "-SkipISO"], cwd=PROJECT_ROOT)
     
     if not KERNEL_BINARY.exists():
         print(f"  ERROR: Kernel binary not found at {KERNEL_BINARY}")
@@ -263,7 +261,7 @@ def step_run_qemu():
     
     run_cmd([
         qemu, "-cdrom", str(OUTPUT_ISO),
-        "-serial", "stdio",
+        "-serial", "file:qemu_out.txt",
         "-m", "128M",
         "-no-reboot",
         "-no-shutdown",
@@ -303,13 +301,16 @@ def main():
             step_create_iso()
             step_run_qemu()
             return
+        elif cmd == "run-qemu":
+            step_run_qemu()
+            return
         else:
             print(f"Unknown command: {cmd}")
-            print("Usage: python build.py [run|clean]")
+            print("Usage: python build.py [run|run-qemu|clean]")
             sys.exit(1)
     
     # Default: build ISO
-    step_build_kernel()
+    # step_build_kernel()  # Disabled to use native PowerShell compilation instead
     step_get_limine()
     step_create_iso()
     

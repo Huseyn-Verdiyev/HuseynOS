@@ -7,6 +7,8 @@
   <p><strong>A modern, formally-inspired 64-bit operating system built entirely from scratch in Rust, leveraging a pure microkernel architecture for maximum safety and efficiency.</strong></p>
 </div>
 
+**About the Author:** This operating system was developed completely from scratch by **Huseyn Verdiyev**, a 15-year-old high school student from Azerbaijan with a deep passion for low-level systems engineering and memory-safe architectures.
+
 **Description:** HuseynOS is an educational operating system built to tackle the inherent security and stability issues of monolithic kernels by strictly isolating device drivers and GUI services into unprivileged Userland processes. It demonstrates how modern memory-safe languages like Rust can be utilized at the bare-metal level to create highly resilient, fault-tolerant architectures without sacrificing performance.
 
 ---

@@ -7,6 +7,8 @@
   <p><strong>A modern, formally-inspired 64-bit operating system built entirely from scratch in Rust, leveraging a pure microkernel architecture for maximum safety and efficiency.</strong></p>
 </div>
 
+**Description:** HuseynOS is an educational operating system built to tackle the inherent security and stability issues of monolithic kernels by strictly isolating device drivers and GUI services into unprivileged Userland processes. It demonstrates how modern memory-safe languages like Rust can be utilized at the bare-metal level to create highly resilient, fault-tolerant architectures without sacrificing performance.
+
 ---
 
 ## 2. 🏗️ Technical Architecture (Engineering Approach)

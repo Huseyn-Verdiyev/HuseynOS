@@ -5,9 +5,7 @@
   ![HuseynOS Demonstration](demo.gif)
 </div>
 
-**About the Author:** This operating system was developed completely from scratch by **Huseyn Verdiyev**, a 15-year-old high school student from Azerbaijan with a deep passion for low-level systems engineering and memory-safe architectures.
-
-**Description:** HuseynOS is an educational operating system built to tackle the inherent security and stability issues of monolithic kernels by strictly isolating device drivers and GUI services into unprivileged Userland processes. It demonstrates how modern memory-safe languages like Rust can be utilized at the bare-metal level to create highly resilient, fault-tolerant architectures without sacrificing performance.
+**HuseynOS** is an educational operating system built to tackle the inherent security and stability issues of monolithic kernels by strictly isolating device drivers and GUI services into unprivileged Userland processes. It demonstrates how modern memory-safe languages like Rust can be utilized at the bare-metal level to create highly resilient, fault-tolerant architectures without sacrificing performance.
 
 ---
 
@@ -65,4 +63,10 @@ I've got big plans for the future of HuseynOS:
 * Unlocking true multi-core processing (SMP).
 
 ---
-*Built with ❤️ in Rust by Huseyn Verdiyev.*
+
+## 👤 Author
+
+Developed by **Huseyn Verdiyev** (Baku, Azerbaijan).  
+Systems enthusiast passionate about operating system kernels, compiler design, and bare-metal architectures.
+
+*Built with ❤️ in Rust.*

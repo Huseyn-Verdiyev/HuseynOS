@@ -1,10 +1,8 @@
----
-
-## 1. 🌟 The Hook
-
 <div align="center">
   <h1>🛡️ HuseynOS</h1>
   <p><strong>A modern, formally-inspired 64-bit operating system built entirely from scratch in Rust, leveraging a pure microkernel architecture for maximum safety and efficiency.</strong></p>
+  
+  ![HuseynOS Demonstration](demo.gif)
 </div>
 
 **About the Author:** This operating system was developed completely from scratch by **Huseyn Verdiyev**, a 15-year-old high school student from Azerbaijan with a deep passion for low-level systems engineering and memory-safe architectures.
@@ -13,66 +11,58 @@
 
 ---
 
-## 2. 🏗️ Technical Architecture (Engineering Approach)
+## 🏗️ How It Was Built
 
-This project was developed **100% from scratch without any external OS templates or standard libraries (`#![no_std]`)**. Every core component, from the Global Descriptor Table to the physical page allocator, was architected from the ground up.
+I built this project **100% from scratch**. I didn't use any external OS templates, and I didn't even use the Rust standard library (`#![no_std]`). Everything you see—from the boot process and memory allocation to the graphical interface—was coded from the ground up.
 
-* **Pure Microkernel Design:** Unlike monolithic kernels (Linux, Windows) where drivers run with full kernel privileges, HuseynOS isolates almost everything. The kernel only handles memory paging, task scheduling, and IPC. Device drivers (Keyboard, Mouse) and the Graphical Compositor run as unprivileged Ring 3 Userland processes. If a driver crashes, the system survives.
-* **Rust & Memory Safety:** By leveraging Rust's ownership and lifetime models at the bare-metal level, HuseynOS inherently prevents entire classes of kernel panics, such as segmentation faults, buffer overflows, and use-after-free bugs, without sacrificing zero-cost abstractions.
-* **Compositor & GUI Rendering:** The GUI avoids tearing via a custom Server-Side Compositor. The compositor process directly maps the physical framebuffer into its virtual address space. It pre-computes complex gradients and static assets into a background cache buffer, performing rapid `memcpy` operations and Z-order sorting before blitting to the screen. All UI events are routed via a strict, synchronous message-passing IPC system (`int 0x80`).
-
----
-
-## 2. ✨ Key Features (Phase 9)
-
-* **Preemptive Multitasking:** True hardware-driven context switching utilizing the Programmable Interval Timer (PIT) bound to IRQ0, forcefully interrupting and scheduling Ring 3 processes.
-* **Advanced Window Management:** Server-side window decoration with draggable title bars, dynamic Z-order focus (bringing clicked windows to the front), and graceful process termination via `MSG_QUIT` IPC signals.
-* **RTC Integration & ACPI:** Real-Time Clock reading directly from CMOS integrated into a dynamic taskbar, alongside programmatic system shutdown via ACPI port triggers.
-* **Dynamic Memory Management:** 4-level paging architecture (`PML4 -> PDPT -> PD -> PT`), demand paging, and a custom Bitmap-based Physical Page Frame Allocator.
+* **Microkernel Design:** Unlike monolithic kernels such as Linux or Windows, my OS strictly follows the microkernel philosophy: the core kernel is intentionally minimal, handling only essential memory management and task scheduling. Everything else runs safely as isolated programs. Device drivers (like the mouse and keyboard) and the Graphical Compositor run as completely separate, unprivileged programs. If the mouse driver crashes, the whole OS doesn't panic.
+* **Memory Safety:** By writing this in Rust, I'm using the language's strict ownership rules right at the hardware level. This naturally prevents common bugs like segmentation faults and memory leaks.
+* **Custom GUI:** The window system uses a Server-Side Compositor. It maps the physical screen into memory, pre-calculates the background to stop screen-tearing, and uses a message-passing system to figure out where your mouse is clicking.
 
 ---
 
-## 3. 🧠 Technologies Used
+## ✨ Features So Far (Phase 9)
 
-* **Language:** Rust (Nightly toolchain, bare-metal `#![no_std]`)
-* **Bootloader:** Limine Boot Protocol (Higher Half Direct Mapping)
-* **Emulation & Testing:** QEMU
-* **Executable Format:** Custom ELF64 binary loader
-* **Filesystem:** FAT12 RAM-disk parser
+* **Preemptive Multitasking:** The OS uses the hardware timer (PIT) to forcefully pause and switch between running programs, so they don't have to wait for each other.
+* **Working Desktop Environment:** You can drag windows around by their title bars, click on them to bring them to the front (Z-order focus), and close them safely using IPC messages.
+* **Real-Time Clock:** The taskbar reads the actual time directly from the motherboard's CMOS.
+* **Memory Paging:** It uses a 4-level paging system and a custom physical page allocator to manage RAM dynamically.
 
 ---
 
-## 4. 🛠️ Build & Run Instructions
+## 🧠 Tech Stack
 
-To compile the microkernel, assemble the FAT12 filesystem image, and launch the OS in QEMU, follow these steps:
+* **Language:** Rust (Nightly, `#![no_std]`)
+* **Bootloader:** Limine
+* **Emulation:** QEMU
+* **Executables:** Custom ELF64 loader
+* **Filesystem:** FAT12 RAM-disk
+
+---
+
+## 🛠️ How to Run It
+
+Want to try it yourself? Just make sure you have Rust, Python, and QEMU installed.
 
 ```bash
-# 1. Install Rust Nightly and the required target
+# 1. Setup Rust
 rustup default nightly
 rustup component add rust-src
 rustup target add x86_64-unknown-none
 
-# 2. Build the OS and launch QEMU (using the automated Python build system)
+# 2. Build and run (my Python script handles everything)
 python build.py run
 ```
 
 ---
 
-## 5. 🗺️ Roadmap (Future Goals)
+## 🗺️ What's Next?
 
-The foundation is rock-solid. The next phases of HuseynOS will focus on expanding capabilities:
-* **Advanced Filesystems:** Transitioning from the FAT12 RAM-disk to full FAT32 and ext4 disk support.
-* **Network Stack:** Implementing a custom TCP/IP stack and integrating VirtIO network drivers.
-* **User-Mode Applications:** Expanding the standard library (`libhuseyn`) to support complex 3rd-party ports.
-* **Symmetric Multiprocessing (SMP):** Waking up Application Processors (APs) for true multi-core execution.
-
----
-
-## 6. 📸 Visual Proofs
-
-![HuseynOS Desktop](screenshot.png)
-
-*(Above: The HuseynOS Beta Desktop Environment showcasing the custom Compositor, draggable terminal windows, and RTC taskbar.)*
+I've got big plans for the future of HuseynOS:
+* Adding real hard drive support (FAT32 and ext4).
+* Writing a TCP/IP network stack to get it online.
+* Supporting user-mode applications and porting 3rd party tools.
+* Unlocking true multi-core processing (SMP).
 
 ---
-*Architected and engineered by Huseyn Verdiyev.*
+*Built with ❤️ in Rust by Huseyn Verdiyev.*

@@ -5,6 +5,7 @@ version = 4
 [[package]]
 name = "libhuseyn"
 version = "0.1.0"
+source = "git+https://github.com/Huseyn-Verdiyev/libhuseyn.git#ef867c2e6a1917381056aefb00c0d953816f1a46"
 
 [[package]]
 name = "terminal"

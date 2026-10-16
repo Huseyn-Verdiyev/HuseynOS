@@ -32,6 +32,7 @@ const SYS_WRITE_FILE: u64 = 20;
 const SYS_UNLINK: u64     = 26;
 const SYS_PROCLIST: u64   = 27;
 const SYS_SYSINFO: u64    = 28;
+const SYS_INSTALL_OS: u64 = 29;
 
 struct Terminal {
     buffer: *mut u32,
@@ -88,7 +89,7 @@ impl Terminal {
 
     fn print_banner(&mut self) {
         self.print_colored("HUSEYN//OS MONOLITH SHELL v1.0\n", CYAN_COLOR);
-        self.print_colored("Commands: help | ls | cat | write | rm | ps | mem | lspci | off\n\n", MUTED_COLOR);
+        self.print_colored("Type 'help' | 'install' 'disks' 'usb' 'acpi' 'lspci' 'ps' 'mem'\n\n", MUTED_COLOR);
     }
 
     fn print_prompt(&mut self) {
@@ -184,6 +185,18 @@ impl Terminal {
         }
     }
 
+    fn query_sysinfo(&mut self, mode: u64, color: u32) {
+        let mut buf = [0u8; 1024];
+        let n = unsafe {
+            syscall(SYS_SYSINFO, buf.as_mut_ptr() as u64, buf.len() as u64, mode, 0, 0, 0) as usize
+        };
+        if n > 0 && n <= buf.len() {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                self.print_colored(s, color);
+            }
+        }
+    }
+
     fn execute_command(&mut self) {
         let line = self.cmd_buf.trim();
         if line.is_empty() {
@@ -197,21 +210,48 @@ impl Terminal {
         match cmd {
             "help" => {
                 self.print_colored("Available Monolith Commands:\n", AMBER_COLOR);
-                self.print_colored("  help                Show command reference\n", TEXT_COLOR);
-                self.print_colored("  ls                  List files in storage\n", TEXT_COLOR);
-                self.print_colored("  cat <file>          Read and display file\n", TEXT_COLOR);
-                self.print_colored("  write <file> <txt>  Write persistent file\n", TEXT_COLOR);
-                self.print_colored("  rm <file>           Delete file from storage\n", TEXT_COLOR);
+                self.print_colored("  install             Format GPT & install OS to disk\n", CYAN_COLOR);
+                self.print_colored("  disks               Show GPT partition & disk status\n", TEXT_COLOR);
+                self.print_colored("  usb                 Show xHCI USB 3.0 & HID ports\n", TEXT_COLOR);
+                self.print_colored("  acpi                Show ACPI MADT, APIC & IOAPIC\n", TEXT_COLOR);
+                self.print_colored("  lspci               Enumerate PCI hardware bus\n", TEXT_COLOR);
                 self.print_colored("  ps                  List active kernel tasks\n", TEXT_COLOR);
-                self.print_colored("  mem                 Show RAM & disk status\n", TEXT_COLOR);
-                self.print_colored("  lspci               Enumerate PCI hardware\n", TEXT_COLOR);
+                self.print_colored("  mem                 Show RAM & PAT WC telemetry\n", TEXT_COLOR);
+                self.print_colored("  ls / cat / rm       Inspect or delete files\n", TEXT_COLOR);
+                self.print_colored("  write <file> <txt>  Write persistent file to disk\n", TEXT_COLOR);
                 self.print_colored("  run <file.elf>      Spawn userland ELF binary\n", TEXT_COLOR);
-                self.print_colored("  sys                 Display kernel & RTC info\n", TEXT_COLOR);
-                self.print_colored("  clear               Clear terminal viewport\n", TEXT_COLOR);
-                self.print_colored("  off                 ACPI hardware shutdown\n", TEXT_COLOR);
+                self.print_colored("  clear / off         Clear screen or ACPI shutdown\n", TEXT_COLOR);
             }
             "clear" => {
                 self.clear_canvas();
+            }
+            "install" => {
+                self.print_colored("Installing HuseynOS to physical disk (GPT + FAT)...\n", AMBER_COLOR);
+                self.update_compositor();
+                let mut buf = [0u8; 1024];
+                let n = unsafe {
+                    syscall(SYS_INSTALL_OS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0) as usize
+                };
+                if n > 0 && n <= buf.len() {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        self.print_colored(s, CYAN_COLOR);
+                    }
+                }
+            }
+            "disks" | "disk" => {
+                self.query_sysinfo(4, TEXT_COLOR);
+            }
+            "usb" | "xhci" => {
+                self.query_sysinfo(3, TEXT_COLOR);
+            }
+            "acpi" | "apic" => {
+                self.query_sysinfo(2, TEXT_COLOR);
+            }
+            "lspci" | "pci" => {
+                self.query_sysinfo(1, TEXT_COLOR);
+            }
+            "mem" => {
+                self.query_sysinfo(0, TEXT_COLOR);
             }
             "ls" => {
                 let mut buf = [0u8; 2048];
@@ -280,7 +320,7 @@ impl Terminal {
                             };
                             close(fd);
                             let mut msg = String::new();
-                            let _ = writeln!(msg, "[OK] Wrote {} bytes to '{}'", written, filename);
+                            let _ = writeln!(msg, "[OK] Wrote {} bytes to '{}' (synced to disk)", written, filename);
                             self.print_colored(&msg, CYAN_COLOR);
                         }
                         Err(_) => {
@@ -317,28 +357,6 @@ impl Terminal {
                     }
                 }
             }
-            "mem" => {
-                let mut buf = [0u8; 1024];
-                let n = unsafe {
-                    syscall(SYS_SYSINFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0) as usize
-                };
-                if n > 0 && n <= buf.len() {
-                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                        self.print_colored(s, TEXT_COLOR);
-                    }
-                }
-            }
-            "lspci" | "pci" => {
-                let mut buf = [0u8; 1024];
-                let n = unsafe {
-                    syscall(SYS_SYSINFO, buf.as_mut_ptr() as u64, buf.len() as u64, 1, 0, 0, 0) as usize
-                };
-                if n > 0 && n <= buf.len() {
-                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
-                        self.print_colored(s, TEXT_COLOR);
-                    }
-                }
-            }
             "run" => {
                 if args.is_empty() {
                     self.print_colored("Usage: run <program.elf>\n", AMBER_COLOR);
@@ -360,7 +378,7 @@ impl Terminal {
                 let pid = libhuseyn::getpid();
                 let mut info = String::new();
                 let _ = writeln!(info, "OS:       HuseynOS v1.0 (Monolith Microkernel)");
-                let _ = writeln!(info, "Arch:     x86_64 (#![no_std] Rust)");
+                let _ = writeln!(info, "Arch:     x86_64 (#![no_std] Rust, Bare-Metal Ready)");
                 let _ = writeln!(info, "Term PID: {}", pid);
                 let _ = writeln!(
                     info,

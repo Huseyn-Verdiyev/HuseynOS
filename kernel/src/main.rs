@@ -3,10 +3,13 @@
 
 extern crate alloc;
 
+mod acpi;
 mod ahci;
+mod apic;
 mod ata;
 mod fat32;
 mod gdt;
+mod gpt;
 mod idt;
 mod ipc;
 mod memory;
@@ -22,6 +25,7 @@ mod shm;
 mod syscall;
 mod vfs;
 mod vma;
+mod xhci;
 
 use core::arch::asm;
 use core::panic::PanicInfo;
@@ -72,11 +76,10 @@ unsafe extern "C" fn kmain() -> ! {
 
     println!("===========================================");
     println!("  HuseynOS v1.0.0 - Monolith Microkernel");
-    println!("  Architecture: x86_64");
+    println!("  Architecture: x86_64 (Bare-Metal Ready)");
     println!("===========================================");
     println!();
 
-    // Verify Limine
     if !BASE_REVISION.is_supported() {
         println!("[FATAL] Limine base revision NOT supported!");
         hcf();
@@ -90,45 +93,52 @@ unsafe extern "C" fn kmain() -> ! {
     idt::init();
     println!("[OK] IDT initialized (256 entries + syscall 0x80)");
 
-    // 4. PIC
+    // 4. PIC & PIT
     pic::init();
     println!("[OK] PIC remapped (IRQs 32-47)");
-
-    // 5. PIT (Timer at 1000 Hz for Preemption)
     pit::init(1000);
 
-    // 6. PS/2 Mouse
+    // 5. PS/2 Mouse
     idt::init_mouse();
 
-    // 7. Frame allocator
+    // 6. Frame allocator
     let mmap = MEMORY_MAP_REQUEST.get_response()
         .expect("No memory map from Limine");
     memory::FrameAllocator::init(mmap);
     println!("[OK] Frame allocator active");
 
-    // 8. Paging
+    // 7. Paging + PAT Write-Combining
     let hhdm = HHDM_REQUEST.get_response()
         .expect("No HHDM from Limine");
     memory::paging::init(hhdm.offset());
 
-    // 9. Heap
+    // 8. Kernel Heap
     memory::heap::init();
     println!("[OK] Heap initialized");
 
-    // 10. PCI Bus & Hardware Discovery (requires Heap for device registry)
+    // 9. ACPI (RSDP/XSDT/MADT) & Local APIC / IOAPIC
+    acpi::init();
+    apic::init();
+
+    // 10. PCI Bus & Hardware Enumeration
     pci::enumerate_pci();
 
-    // 11. Hardware Block Storage (AHCI SATA 3.0 + ATA/PIO + FAT Volume)
+    // 11. USB 3.0 (xHCI) Host Controller & BIOS Handoff
+    if let Some(bar0) = pci::find_xhci_bar0() {
+        xhci::init(bar0);
+    }
+
+    // 12. Hardware Block Storage (AHCI SATA 3.0 DMA + ATA/PIO + GPT/FAT Volume)
     if let Some(bar5) = pci::find_ahci_bar5() {
         ahci::init(bar5);
     }
     ata::init();
     fat32::init();
 
-    // 12. Scheduler
+    // 13. Scheduler
     scheduler::init();
 
-    // 13. Spawn init process
+    // 14. Spawn init process
     if let Some(data) = fat32::read_file("init.elf") {
         if let Some(pid) = process::load_elf("init.elf", &data, 0) {
             println!("[OK] Spawned init.elf (PID {})", pid);
@@ -139,7 +149,7 @@ unsafe extern "C" fn kmain() -> ! {
         println!("[ERROR] init.elf not found in root directory!");
     }
 
-    // 14. Enable interrupts
+    // 15. Enable interrupts
     idt::enable_interrupts();
     println!("[OK] Interrupts enabled - HuseynOS Monolith ready!");
     println!();

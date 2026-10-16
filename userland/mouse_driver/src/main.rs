@@ -3,46 +3,41 @@
 
 use libhuseyn::ipc;
 
-const DEFAULT_WIDTH: i32 = 1024;
-const DEFAULT_HEIGHT: i32 = 768;
-
-/// PS/2 mouse sends 3-byte packets:
-///   Byte 0: [YO|XO|YS|XS|1|MB|RB|LB]
-///   Byte 1: X movement (signed, with sign in byte 0 bit 4)
-///   Byte 2: Y movement (signed, with sign in byte 0 bit 5)
+/// PS/2 & USB-HID mouse state with dynamic resolution bounds (1080p/2K/4K ready)
+/// and ballistic acceleration for high-DPI displays.
 struct MouseState {
-    phase: u8,       // 0, 1, or 2 — which byte of the 3-byte packet
-    packet: [u8; 3], // current 3-byte packet being assembled
-    x: i32,          // absolute cursor X
-    y: i32,          // absolute cursor Y
-    buttons: u8,     // button state (bit 0=left, bit 1=right, bit 2=middle)
+    phase: u8,
+    packet: [u8; 3],
+    x: i32,
+    y: i32,
+    buttons: u8,
     screen_w: i32,
     screen_h: i32,
 }
 
 impl MouseState {
     fn new(w: i32, h: i32) -> Self {
+        let safe_w = if w > 0 { w } else { 1024 };
+        let safe_h = if h > 0 { h } else { 768 };
         Self {
             phase: 0,
             packet: [0; 3],
-            x: w / 2,
-            y: h / 2,
+            x: safe_w / 2,
+            y: safe_h / 2,
             buttons: 0,
-            screen_w: w,
-            screen_h: h,
+            screen_w: safe_w,
+            screen_h: safe_h,
         }
     }
 
-    /// Process one byte from the PS/2 mouse. Returns true when a full packet is ready.
+    /// Process one byte from the mouse stream. Returns true when a full 3-byte packet is ready.
     fn feed(&mut self, byte: u8) -> bool {
         match self.phase {
             0 => {
-                // Byte 0 must have bit 3 set (alignment bit)
                 if byte & 0x08 != 0 {
                     self.packet[0] = byte;
                     self.phase = 1;
                 }
-                // If bit 3 is not set, discard (re-sync)
                 false
             }
             1 => {
@@ -65,26 +60,29 @@ impl MouseState {
 
     fn process_packet(&mut self) {
         let flags = self.packet[0];
-        self.buttons = flags & 0x07;
-
-        // X movement — sign extend using bit 4 of flags
-        let mut dx = self.packet[1] as i32;
-        if flags & 0x10 != 0 {
-            dx -= 256; // sign-extend: it's negative
+        if flags & 0xC0 != 0 {
+            return; // Discard X/Y overflow packets
         }
 
-        // Y movement — sign extend using bit 5 of flags
+        self.buttons = flags & 0x07;
+
+        let mut dx = self.packet[1] as i32;
+        if flags & 0x10 != 0 {
+            dx -= 256;
+        }
+
         let mut dy = self.packet[2] as i32;
         if flags & 0x20 != 0 {
             dy -= 256;
         }
-
-        // PS/2 Y is inverted (up = positive), so negate for screen coords
         dy = -dy;
 
-        // Check for overflow flags and discard if set
-        if flags & 0xC0 != 0 {
-            return; // X or Y overflow, discard
+        // Subtle ballistic acceleration for 1080p / 4K displays
+        if dx.abs() > 8 {
+            dx = dx * 3 / 2;
+        }
+        if dy.abs() > 8 {
+            dy = dy * 3 / 2;
         }
 
         self.x = (self.x + dx).clamp(0, self.screen_w - 1);
@@ -105,7 +103,6 @@ pub extern "C" fn _start() -> ! {
             let byte = msg.arg1 as u8;
 
             if state.feed(byte) {
-                // Full packet received - send mouse move to compositor (PID 5)
                 let mut move_msg = ipc::Message::empty();
                 move_msg.msg_type = ipc::MSG_MOUSE_MOVE;
                 move_msg.arg1 = state.x as u64;
@@ -115,7 +112,6 @@ pub extern "C" fn _start() -> ! {
                     libhuseyn::yield_now();
                 }
 
-                // Check for button state changes (clicks)
                 if state.buttons != prev_buttons {
                     let mut click_msg = ipc::Message::empty();
                     click_msg.msg_type = ipc::MSG_MOUSE_CLICK;

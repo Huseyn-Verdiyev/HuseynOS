@@ -6,7 +6,7 @@ Automates: compile kernel & userland -> prepare Limine -> create bootable ISO ->
 
 Usage:
     python build.py              # Build kernel, userland, and ISO
-    python build.py run          # Build ISO and launch in QEMU
+    python build.py run          # Build ISO and launch in QEMU (with AHCI SATA disk + xHCI USB)
     python build.py clean        # Clean build artifacts
 
 Works on macOS, Linux, and Windows without xorriso — uses pycdlib (pure Python) for ISO creation.
@@ -31,6 +31,7 @@ BUILD_DIR = PROJECT_ROOT / "build"
 ISO_ROOT = BUILD_DIR / "iso_root"
 LIMINE_DIR = BUILD_DIR / "limine"
 OUTPUT_ISO = BUILD_DIR / "huseynos.iso"
+DISK_IMG = BUILD_DIR / "disk.img"
 
 CARGO_TARGET = "x86_64-unknown-none"
 KERNEL_BINARY = PROJECT_ROOT / "target" / CARGO_TARGET / "release" / "huseynos-kernel"
@@ -221,12 +222,17 @@ def step_create_iso():
     size_mb = OUTPUT_ISO.stat().st_size / (1024 * 1024)
     print(f"  OK: ISO created: {OUTPUT_ISO.name} ({size_mb:.1f} MB)")
 
+    # Ensure persistent 8 MiB virtual SATA/ATA disk exists for GPT & OS installation
+    if not DISK_IMG.exists():
+        print(f"  Creating persistent virtual disk: {DISK_IMG} (8 MiB)")
+        DISK_IMG.write_bytes(b"\x00" * (8 * 1024 * 1024))
+
 
 # ─── Step 4: Run in QEMU ─────────────────────────────────────────────────────
 
 def step_run_qemu():
     print("\n" + "-" * 50)
-    print("  [4/4] Launching in QEMU...")
+    print("  [4/4] Launching in QEMU (UEFI + AHCI SATA + xHCI USB 3.0)...")
     print("-" * 50)
 
     qemu = find_tool("qemu-system-x86_64")
@@ -235,8 +241,14 @@ def step_run_qemu():
         print(f"  → Open VirtualBox, create a VM, and attach: {OUTPUT_ISO}")
         return
 
+    if not DISK_IMG.exists():
+        DISK_IMG.write_bytes(b"\x00" * (8 * 1024 * 1024))
+
     run_cmd([
-        qemu, "-cdrom", str(OUTPUT_ISO),
+        qemu,
+        "-cdrom", str(OUTPUT_ISO),
+        "-hda", str(DISK_IMG),
+        "-device", "qemu-xhci,id=xhci",
         "-drive", "if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
         "-serial", "file:qemu_out.txt",
         "-m", "128M",
@@ -293,7 +305,8 @@ def main():
 
     print("\n" + "=" * 50)
     print("  OK: Build complete!")
-    print(f"  ISO: {OUTPUT_ISO}")
+    print(f"  ISO:  {OUTPUT_ISO}")
+    print(f"  Disk: {DISK_IMG}")
     print("  Run in QEMU:      python build.py run")
     print("  Run in VirtualBox: Attach ISO as CD/DVD")
     print("=" * 50)

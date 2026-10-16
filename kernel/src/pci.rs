@@ -166,6 +166,17 @@ pub fn find_ahci_bar5() -> Option<u32> {
     None
 }
 
+/// Return BAR0 of the first discovered xHCI/USB controller, if any.
+pub fn find_xhci_bar0() -> Option<u32> {
+    let devs = PCI_DEVICES.lock();
+    for d in devs.iter() {
+        if d.class_id == 0x0C && d.subclass_id == 0x03 && d.bar0 != 0 {
+            return Some(d.bar0);
+        }
+    }
+    None
+}
+
 /// Format discovered PCI devices for `lspci` (`SYS_SYSINFO` mode 1).
 pub fn format_pci_list() -> String {
     let devs = PCI_DEVICES.lock();

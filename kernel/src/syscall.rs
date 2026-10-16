@@ -5,34 +5,35 @@ use crate::process;
 use crate::scheduler;
 
 /// Syscall numbers.
-pub const SYS_SEND: u64 = 1;
-pub const SYS_RECV: u64 = 2;
-pub const SYS_EXIT: u64 = 3;
-pub const SYS_YIELD: u64 = 4;
-pub const SYS_GETPID: u64 = 5;
+pub const SYS_SEND: u64         = 1;
+pub const SYS_RECV: u64         = 2;
+pub const SYS_EXIT: u64         = 3;
+pub const SYS_YIELD: u64        = 4;
+pub const SYS_GETPID: u64       = 5;
 pub const SYS_MAP_PHYSICAL: u64 = 6;
-pub const SYS_INB: u64 = 7;
-pub const SYS_GET_FB_INFO: u64 = 8;
-pub const SYS_MMAP: u64 = 9;
-pub const SYS_MUNMAP: u64 = 10;
-pub const SYS_SBRK: u64 = 11;
-pub const SYS_SHM_CREATE: u64 = 12;
-pub const SYS_SHM_MAP: u64 = 13;
-pub const SYS_SHM_UNMAP: u64 = 14;
-pub const SYS_SPAWN: u64 = 15;
-pub const SYS_EXECVE: u64 = 16;
-pub const SYS_WAITPID: u64 = 17;
-pub const SYS_OPEN: u64 = 18;
-pub const SYS_READ: u64 = 19;
-pub const SYS_WRITE_FILE: u64 = 20;
-pub const SYS_CLOSE: u64 = 21;
-pub const SYS_STAT: u64 = 22;
-pub const SYS_LISTDIR: u64 = 23;
-pub const SYS_SHUTDOWN: u64 = 24;
-pub const SYS_GET_TIME: u64 = 25;
-pub const SYS_UNLINK: u64 = 26;
-pub const SYS_PROCLIST: u64 = 27;
-pub const SYS_SYSINFO: u64 = 28;
+pub const SYS_INB: u64          = 7;
+pub const SYS_GET_FB_INFO: u64  = 8;
+pub const SYS_MMAP: u64         = 9;
+pub const SYS_MUNMAP: u64       = 10;
+pub const SYS_SBRK: u64         = 11;
+pub const SYS_SHM_CREATE: u64   = 12;
+pub const SYS_SHM_MAP: u64      = 13;
+pub const SYS_SHM_UNMAP: u64    = 14;
+pub const SYS_SPAWN: u64        = 15;
+pub const SYS_EXECVE: u64       = 16;
+pub const SYS_WAITPID: u64      = 17;
+pub const SYS_OPEN: u64         = 18;
+pub const SYS_READ: u64         = 19;
+pub const SYS_WRITE_FILE: u64   = 20;
+pub const SYS_CLOSE: u64        = 21;
+pub const SYS_STAT: u64         = 22;
+pub const SYS_LISTDIR: u64      = 23;
+pub const SYS_SHUTDOWN: u64     = 24;
+pub const SYS_GET_TIME: u64     = 25;
+pub const SYS_UNLINK: u64       = 26;
+pub const SYS_PROCLIST: u64     = 27;
+pub const SYS_SYSINFO: u64      = 28;
+pub const SYS_INSTALL_OS: u64   = 29;
 
 fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<String> {
     if let Some(proc) = crate::process::get_process_mut(pid) {
@@ -123,7 +124,7 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let virt = arg1;
             let phys = arg2;
             let size = arg3;
-            crate::serial_println!("[Kernel] SYS_MAP_PHYSICAL called by PID {} - virt={:#X} phys={:#X} size={:#X}", scheduler::current_pid(), virt, phys, size);
+            crate::serial_println!("[Kernel] SYS_MAP_PHYSICAL (PAT Write-Combining) PID {} - virt={:#X} phys={:#X} size={:#X}", scheduler::current_pid(), virt, phys, size);
 
             let start_virt = virt & !0xFFF;
             let start_phys = phys & !0xFFF;
@@ -132,8 +133,13 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let mut v = start_virt;
             let mut p = start_phys;
 
+            // Map with USER | WRITABLE | WRITE_COMBINING (PAT1 = WC) for 1080p/4K hardware acceleration
+            let flags = crate::memory::paging::USER
+                | crate::memory::paging::WRITABLE
+                | crate::memory::paging::WRITE_COMBINING;
+
             while v < end_virt {
-                crate::memory::paging::map_page(v, p, crate::memory::paging::USER | crate::memory::paging::WRITABLE);
+                crate::memory::paging::map_page(v, p, flags);
                 v += 0x1000;
                 p += 0x1000;
             }
@@ -487,34 +493,71 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_SYSINFO => {
-            // arg1 = user_buf_ptr, arg2 = buf_size, arg3 = mode (0 = mem/storage, 1 = lspci)
+            // arg1 = user_buf_ptr, arg2 = buf_size, arg3 = mode:
+            //   0 = RAM + Storage overview (`mem`)
+            //   1 = PCI enumeration (`lspci`)
+            //   2 = ACPI + APIC + SMP CPU topology (`acpi`)
+            //   3 = xHCI USB 3.0 controller & root hub ports (`usb`)
+            //   4 = Block devices & GPT Partition table (`disks`)
             let pid = scheduler::current_pid();
             let user_buf = arg1;
             let buf_size = arg2 as usize;
             let mode = arg3;
 
-            let output = if mode == 1 {
-                crate::pci::format_pci_list()
-            } else {
-                let (total_f, used_f, free_f) = crate::memory::frame::FrameAllocator::stats();
-                let mut s = String::new();
-                let _ = writeln!(
-                    s,
-                    "Physical RAM : {} KiB total | {} KiB used | {} KiB free",
-                    total_f * 4,
-                    used_f * 4,
-                    free_f * 4
-                );
-                let _ = writeln!(
-                    s,
-                    "ATA PIO Disk : {}",
-                    if crate::ata::is_available() { "ONLINE (Primary Master LBA28)" } else { "STANDBY (RAM Overlay Active)" }
-                );
-                s.push_str(&crate::ahci::format_status());
-                s
+            let output = match mode {
+                1 => crate::pci::format_pci_list(),
+                2 => crate::apic::format_status(),
+                3 => crate::xhci::format_status(),
+                4 => crate::gpt::format_disk_report(),
+                _ => {
+                    let (total_f, used_f, free_f) = crate::memory::frame::FrameAllocator::stats();
+                    let mut s = String::new();
+                    let _ = writeln!(
+                        s,
+                        "Physical RAM : {} KiB total | {} KiB used | {} KiB free",
+                        total_f * 4,
+                        used_f * 4,
+                        free_f * 4
+                    );
+                    let _ = writeln!(s, "Framebuffer  : PAT1 Write-Combining Enabled (1080p/4K Ready)");
+                    let _ = writeln!(
+                        s,
+                        "ATA PIO Disk : {}",
+                        if crate::ata::is_available() { "ONLINE (Primary Master LBA28)" } else { "STANDBY" }
+                    );
+                    s.push_str(&crate::ahci::format_status());
+                    s
+                }
             };
 
             let bytes = output.as_bytes();
+            let to_copy = bytes.len().min(buf_size);
+            if let Some(proc) = process::get_process_mut(pid) {
+                write_user_bytes(proc.pml4_phys, user_buf, &bytes[..to_copy]);
+            }
+            ctx.rax = to_copy as u64;
+            context_ptr
+        }
+        SYS_INSTALL_OS => {
+            let pid = scheduler::current_pid();
+            let user_buf = arg1;
+            let buf_size = arg2 as usize;
+
+            let mut s = String::new();
+            match crate::fat32::install_to_disk() {
+                Ok(sectors) => {
+                    let _ = writeln!(s, "[OK] GPT Partition Table written (LBA 0..2)");
+                    let _ = writeln!(s, "  p1: EFI System Partition (LBA 64..2047)");
+                    let _ = writeln!(s, "  p2: HUSEYNOS-ROOT Volume (LBA 2048..5120)");
+                    let _ = writeln!(s, "[OK] Flashed {} sectors (FAT volume + ELF apps + user files)", sectors);
+                    let _ = writeln!(s, "[OK] HuseynOS is now permanently installed on disk!");
+                }
+                Err(e) => {
+                    let _ = writeln!(s, "[ERR] Disk install failed: {}", e);
+                }
+            }
+
+            let bytes = s.as_bytes();
             let to_copy = bytes.len().min(buf_size);
             if let Some(proc) = process::get_process_mut(pid) {
                 write_user_bytes(proc.pml4_phys, user_buf, &bytes[..to_copy]);

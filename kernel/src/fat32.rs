@@ -14,7 +14,14 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 static mut FS_BASE: *const u8 = core::ptr::null();
 static mut FS_SIZE: usize = 0;
 
-/// Overlay store for newly created/modified files in HuseynOS (synced to ATA LBA 2048+ when disk is present).
+/// True when HuseynOS detected a valid GPT + HUSEYNOS-ROOT partition on the attached physical disk.
+static DISK_BOOT_ACTIVE: Mutex<bool> = Mutex::new(false);
+
+/// Starting LBA on the physical disk where user-created persistent files are stored (16 slots, 2 sectors each).
+const PERSIST_TABLE_LBA: u64 = 5200;
+const PERSIST_MAGIC: &[u8; 8] = b"HUSFILE1";
+
+/// Overlay store for newly created/modified files in HuseynOS.
 static OVERLAY_FILES: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
 /// Track deleted filenames so `rm <file>` works across both overlay and boot volume files.
 static DELETED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -63,30 +70,125 @@ struct DirEntry {
 }
 
 pub fn init() {
-    let response = match MODULE_REQUEST.get_response() {
-        Some(resp) => resp,
-        None => {
-            serial_println!("[FAIL] No modules provided by Limine.");
-            return;
-        }
-    };
+    if let Some(resp) = MODULE_REQUEST.get_response() {
+        let modules = resp.modules();
+        serial_println!("[FAT] Found {} boot modules.", modules.len());
 
-    let modules = response.modules();
-    serial_println!("[FAT] Found {} boot modules.", modules.len());
-
-    for module in modules {
-        let path = module.path().to_str().unwrap_or("<invalid path>");
-        if path.contains("fs.img") {
-            serial_println!("[FAT] Mounted filesystem image ({} bytes)", module.size());
-            unsafe {
-                FS_BASE = module.addr() as *const u8;
-                FS_SIZE = module.size() as usize;
+        for module in modules {
+            let path = module.path().to_str().unwrap_or("<invalid path>");
+            if path.contains("fs.img") {
+                unsafe {
+                    FS_BASE = module.addr() as *const u8;
+                    FS_SIZE = module.size() as usize;
+                }
+                print_summary();
+                break;
             }
-            print_summary();
-            return;
         }
     }
-    serial_println!("[FAIL] fs.img not found in boot modules.");
+
+    // Check if the attached physical disk (AHCI SATA or ATA PIO) already has a GPT HuseynOS installation
+    if crate::gpt::is_gpt_installed() {
+        *DISK_BOOT_ACTIVE.lock() = true;
+        load_persistent_files_from_disk();
+        serial_println!("[DISK] Mounted persistent GPT partition (p2: HUSEYNOS-ROOT @ LBA 2048)");
+    } else if crate::gpt::has_physical_disk() {
+        serial_println!("[DISK] Unformatted physical disk detected — run 'install' in Terminal to format GPT & install OS");
+    }
+}
+
+pub fn boot_source_name() -> &'static str {
+    if *DISK_BOOT_ACTIVE.lock() {
+        "GPT Disk Partition 2 (HUSEYNOS-ROOT) + Live Kernel"
+    } else {
+        "Live ISO/RAM Module (fs.img)"
+    }
+}
+
+/// Load persisted user files from physical disk LBA 5200..5232 into `OVERLAY_FILES`.
+fn load_persistent_files_from_disk() {
+    let mut overlay = OVERLAY_FILES.lock();
+    for slot in 0..16u64 {
+        let lba = PERSIST_TABLE_LBA + slot * 2;
+        let mut hdr = [0u8; 512];
+        if !crate::gpt::read_disk_sector(lba, &mut hdr) {
+            break;
+        }
+        if &hdr[0..8] != PERSIST_MAGIC {
+            continue;
+        }
+        let name_len = (hdr[8] as usize).min(32);
+        let data_len = u16::from_le_bytes([hdr[10], hdr[11]]) as usize;
+        if name_len == 0 || data_len > 448 {
+            continue;
+        }
+        if let Ok(name_str) = core::str::from_utf8(&hdr[16..16 + name_len]) {
+            let name = String::from(name_str);
+            let data = hdr[64..64 + data_len].to_vec();
+            if let Some(existing) = overlay.iter_mut().find(|(n, _)| *n == name) {
+                existing.1 = data;
+            } else {
+                overlay.push((name, data));
+            }
+        }
+    }
+}
+
+/// Sync all `OVERLAY_FILES` to physical disk LBA 5200..5232 so files survive reboots.
+fn sync_persistent_files_to_disk() {
+    if !crate::gpt::has_physical_disk() {
+        return;
+    }
+    let overlay = OVERLAY_FILES.lock();
+    for slot in 0..16usize {
+        let lba = PERSIST_TABLE_LBA + (slot as u64) * 2;
+        let mut sector = [0u8; 512];
+        if slot < overlay.len() {
+            let (ref name, ref data) = overlay[slot];
+            sector[0..8].copy_from_slice(PERSIST_MAGIC);
+            let nbytes = name.as_bytes();
+            let nlen = nbytes.len().min(32);
+            let dlen = data.len().min(448);
+            sector[8] = nlen as u8;
+            sector[10..12].copy_from_slice(&(dlen as u16).to_le_bytes());
+            sector[16..16 + nlen].copy_from_slice(&nbytes[..nlen]);
+            sector[64..64 + dlen].copy_from_slice(&data[..dlen]);
+        }
+        let _ = crate::gpt::write_disk_sector(lba, &sector);
+    }
+}
+
+/// Format the attached physical disk with GPT (ESP + HUSEYNOS-ROOT), write the bootable FAT volume
+/// at LBA 2048+, and persist all user files at LBA 5200+.
+pub fn install_to_disk() -> Result<usize, &'static str> {
+    if !crate::gpt::has_physical_disk() {
+        return Err("No physical AHCI/ATA disk attached");
+    }
+    if !crate::gpt::write_gpt_layout() {
+        return Err("Failed to write GPT partition table");
+    }
+
+    let mut sectors_written = 3usize; // MBR + GPT Header + GPT Entries
+
+    unsafe {
+        if !FS_BASE.is_null() && FS_SIZE > 0 {
+            // Write the active FAT filesystem header, FAT tables, root directory, and ELF binaries (first 256 sectors = 128 KiB)
+            let total_sectors = (FS_SIZE / 512).min(256);
+            for s in 0..total_sectors {
+                let mut buf = [0u8; 512];
+                let src = FS_BASE.add(s * 512);
+                core::ptr::copy_nonoverlapping(src, buf.as_mut_ptr(), 512);
+                if crate::gpt::write_disk_sector(crate::gpt::HUSEYNOS_PART_START_LBA + s as u64, &buf) {
+                    sectors_written += 1;
+                }
+            }
+        }
+    }
+
+    sync_persistent_files_to_disk();
+    sectors_written += 16;
+    *DISK_BOOT_ACTIVE.lock() = true;
+    Ok(sectors_written)
 }
 
 fn print_summary() {
@@ -107,7 +209,7 @@ fn print_summary() {
     }
 }
 
-/// Write or update a file in the HuseynOS storage layer (and flush to hardware ATA disk if attached).
+/// Write or update a file in the HuseynOS storage layer and flush to persistent disk storage.
 pub fn write_file(filename: &str, data: &[u8]) {
     let key = filename.to_uppercase();
     {
@@ -122,15 +224,10 @@ pub fn write_file(filename: &str, data: &[u8]) {
     }
     drop(overlay);
 
-    if crate::ata::is_available() {
-        let mut sector = [0u8; 512];
-        let copy_len = data.len().min(512);
-        sector[..copy_len].copy_from_slice(&data[..copy_len]);
-        let _ = crate::ata::write_sector(2048, &sector);
-    }
+    sync_persistent_files_to_disk();
 }
 
-/// Delete a file by name from the HuseynOS storage layer (`rm`).
+/// Delete a file by name from the HuseynOS storage layer (`rm`) and update persistent disk storage.
 pub fn delete_file(filename: &str) -> bool {
     let key = filename.to_uppercase();
     let existed = read_file(&key).is_some();
@@ -148,6 +245,7 @@ pub fn delete_file(filename: &str) -> bool {
             deleted.push(key);
         }
     }
+    sync_persistent_files_to_disk();
     true
 }
 

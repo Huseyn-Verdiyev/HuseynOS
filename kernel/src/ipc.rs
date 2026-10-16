@@ -1,12 +1,14 @@
 use crate::process::Pid;
 use crate::scheduler;
-use crate::{serial_print, serial_println};
 use spin::Mutex;
 
-/// Max messages per process queue.
-const QUEUE_SIZE: usize = 16;
+/// Max messages per process queue (expanded to 64 to handle high-frequency input bursts).
+const QUEUE_SIZE: usize = 64;
 /// Max payload size per message.
 pub const MSG_PAYLOAD_SIZE: usize = 64;
+
+/// Mouse move IPC message type (coalesced when consecutive).
+const MSG_MOUSE_MOVE: u64 = 0x41;
 
 /// An IPC message.
 #[derive(Clone, Copy, Debug)]
@@ -57,6 +59,17 @@ impl MessageQueue {
     }
 
     fn push(&mut self, msg: Message) -> bool {
+        // Coalesce consecutive MSG_MOUSE_MOVE events so rapid mouse movement never drops clicks
+        if msg.msg_type == MSG_MOUSE_MOVE && self.count > 0 {
+            let last_idx = (self.tail + QUEUE_SIZE - 1) % QUEUE_SIZE;
+            if let Some(ref mut last_msg) = self.messages[last_idx] {
+                if last_msg.msg_type == MSG_MOUSE_MOVE && last_msg.sender == msg.sender {
+                    *last_msg = msg;
+                    return true;
+                }
+            }
+        }
+
         if self.count >= QUEUE_SIZE {
             return false;
         }
@@ -74,10 +87,6 @@ impl MessageQueue {
         self.head = (self.head + 1) % QUEUE_SIZE;
         self.count -= 1;
         msg
-    }
-
-    fn is_empty(&self) -> bool {
-        self.count == 0
     }
 }
 
@@ -108,8 +117,7 @@ pub fn send(to_pid: Pid, msg_type: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u
     let ok = queues[to_pid].push(msg);
 
     if ok {
-        // Unblock receiver if it was waiting
-        drop(queues); // Release lock before scheduler call
+        drop(queues);
         scheduler::unblock(to_pid);
     }
     ok
@@ -125,4 +133,3 @@ pub fn try_receive() -> Option<Message> {
         None
     }
 }
-

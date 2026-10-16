@@ -3,6 +3,7 @@ use crate::{serial_print, serial_println};
 use core::slice;
 use alloc::string::String;
 use alloc::vec::Vec;
+use spin::Mutex;
 
 /// Limine boot module request.
 #[used]
@@ -12,6 +13,9 @@ static MODULE_REQUEST: ModuleRequest = ModuleRequest::new();
 /// Cached pointer to the beginning of the FAT image in RAM.
 static mut FS_BASE: *const u8 = core::ptr::null();
 static mut FS_SIZE: usize = 0;
+
+/// Overlay store for newly created/modified files in HuseynOS (synced to ATA LBA 2048+ when disk is present).
+static OVERLAY_FILES: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
 
 /// BPB (BIOS Parameter Block) specifically for FAT12/FAT16.
 #[repr(C, packed)]
@@ -31,7 +35,6 @@ struct BootSector {
     num_heads: u16,
     hidden_sectors: u32,
     total_sectors_32: u32,
-    // FAT12/16 specific Extended BPB
     drive_number: u8,
     reserved1: u8,
     boot_signature: u8,
@@ -77,7 +80,6 @@ pub fn init() {
                 FS_BASE = module.addr() as *const u8;
                 FS_SIZE = module.size() as usize;
             }
-            // Print summary
             print_summary();
             return;
         }
@@ -103,53 +105,92 @@ fn print_summary() {
     }
 }
 
-/// List all files in the root directory. Returns a Vec of (name, size) tuples.
+/// Write or update a file in the HuseynOS storage layer (and flush to hardware ATA disk if attached).
+pub fn write_file(filename: &str, data: &[u8]) {
+    let key = filename.to_uppercase();
+    let mut overlay = OVERLAY_FILES.lock();
+    if let Some(entry) = overlay.iter_mut().find(|(n, _)| *n == key) {
+        entry.1 = data.to_vec();
+    } else {
+        overlay.push((key.clone(), data.to_vec()));
+    }
+    drop(overlay);
+
+    // If hardware ATA disk is online, also flush the first sector to LBA 2048 for persistent block verification
+    if crate::ata::is_available() {
+        let mut sector = [0u8; 512];
+        let copy_len = data.len().min(512);
+        sector[..copy_len].copy_from_slice(&data[..copy_len]);
+        let _ = crate::ata::write_sector(2048, &sector);
+    }
+}
+
+/// List all files in the root directory (merging boot volume + user-written files).
 pub fn list_files() -> Vec<(String, u32)> {
     let mut files = Vec::new();
     unsafe {
-        if FS_BASE.is_null() { return files; }
-        let bpb = &*(FS_BASE as *const BootSector);
+        if !FS_BASE.is_null() {
+            let bpb = &*(FS_BASE as *const BootSector);
 
-        let bytes_per_sector = {bpb.bytes_per_sector} as usize;
-        let reserved_sectors = {bpb.reserved_sectors} as usize;
-        let num_fats = {bpb.num_fats} as usize;
-        let root_entries = {bpb.root_entries} as usize;
-        let sectors_per_fat = {bpb.sectors_per_fat_16} as usize;
+            let bytes_per_sector = {bpb.bytes_per_sector} as usize;
+            let reserved_sectors = {bpb.reserved_sectors} as usize;
+            let num_fats = {bpb.num_fats} as usize;
+            let root_entries = {bpb.root_entries} as usize;
+            let sectors_per_fat = {bpb.sectors_per_fat_16} as usize;
 
-        let fat_size_bytes = num_fats * sectors_per_fat * bytes_per_sector;
-        let root_dir_offset = (reserved_sectors * bytes_per_sector) + fat_size_bytes;
-        let root_dir_ptr = FS_BASE.add(root_dir_offset) as *const DirEntry;
+            let fat_size_bytes = num_fats * sectors_per_fat * bytes_per_sector;
+            let root_dir_offset = (reserved_sectors * bytes_per_sector) + fat_size_bytes;
+            let root_dir_ptr = FS_BASE.add(root_dir_offset) as *const DirEntry;
 
-        for i in 0..root_entries {
-            let entry = &*root_dir_ptr.add(i);
-            if entry.name[0] == 0x00 { break; }
-            if entry.name[0] == 0xE5 { continue; }
-            if entry.attr & 0x08 != 0 { continue; } // Volume Label
-            if entry.attr & 0x10 != 0 { continue; } // Directory
+            for i in 0..root_entries {
+                let entry = &*root_dir_ptr.add(i);
+                if entry.name[0] == 0x00 { break; }
+                if entry.name[0] == 0xE5 { continue; }
+                if entry.attr & 0x08 != 0 { continue; }
+                if entry.attr & 0x10 != 0 { continue; }
 
-            let mut name_buf = [0u8; 11];
-            name_buf.copy_from_slice(&{entry.name});
+                let mut name_buf = [0u8; 11];
+                name_buf.copy_from_slice(&{entry.name});
 
-            // Format 8.3 name nicely
-            let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
-            let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
-            let full_name = if ext.is_empty() {
-                String::from(base)
-            } else {
-                let mut s = String::from(base);
-                s.push('.');
-                s.push_str(ext);
-                s
-            };
+                let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
+                let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
+                let full_name = if ext.is_empty() {
+                    String::from(base)
+                } else {
+                    let mut s = String::from(base);
+                    s.push('.');
+                    s.push_str(ext);
+                    s
+                };
 
-            files.push((full_name, {entry.file_size}));
+                files.push((full_name, {entry.file_size}));
+            }
         }
     }
+
+    let overlay = OVERLAY_FILES.lock();
+    for (name, data) in overlay.iter() {
+        if let Some(existing) = files.iter_mut().find(|(n, _)| *n == *name) {
+            existing.1 = data.len() as u32;
+        } else {
+            files.push((name.clone(), data.len() as u32));
+        }
+    }
+
     files
 }
 
-/// Read a file by name from the root directory. Returns file contents or None.
+/// Read a file by name from the overlay store or FAT boot directory.
 pub fn read_file(filename: &str) -> Option<Vec<u8>> {
+    let search_name = filename.to_uppercase();
+
+    {
+        let overlay = OVERLAY_FILES.lock();
+        if let Some((_, data)) = overlay.iter().find(|(n, _)| *n == search_name) {
+            return Some(data.clone());
+        }
+    }
+
     unsafe {
         if FS_BASE.is_null() { return None; }
         let bpb = &*(FS_BASE as *const BootSector);
@@ -167,9 +208,6 @@ pub fn read_file(filename: &str) -> Option<Vec<u8>> {
 
         let root_dir_sectors = ((root_entries * 32) + (bytes_per_sector - 1)) / bytes_per_sector;
         let first_data_sector = reserved_sectors + (num_fats * sectors_per_fat) + root_dir_sectors;
-
-        // Convert filename to uppercase 8.3 format for comparison
-        let search_name = filename.to_uppercase();
 
         for i in 0..root_entries {
             let entry = &*root_dir_ptr.add(i);

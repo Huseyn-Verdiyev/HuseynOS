@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="$HOME/.cargo/bin:/Users/huseyn/.cargo/bin:/opt/homebrew/bin:$PATH"
 
 echo "Building Kernel..."
 cargo build --release --target x86_64-unknown-none

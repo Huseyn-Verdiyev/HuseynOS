@@ -1,7 +1,7 @@
 /// VFS — Virtual File System layer with per-process file descriptor tables.
 ///
-/// Provides SYS_OPEN / SYS_READ / SYS_WRITE / SYS_CLOSE / SYS_STAT / SYS_LIST_DIR
-/// operating on the existing in-memory FAT12 ramdisk.
+/// Provides SYS_OPEN / SYS_READ / SYS_WRITE_FILE / SYS_CLOSE / SYS_STAT / SYS_LISTDIR
+/// operating on the HuseynOS storage layer (FAT boot volume + persistent overlay/ATA sync).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -14,8 +14,9 @@ pub const MAX_FDS: usize = 16;
 pub struct FileDescriptor {
     pub filename: String,
     pub data: Vec<u8>,
-    pub offset: usize,  // current read/write position
+    pub offset: usize,
     pub writable: bool,
+    pub dirty: bool,
 }
 
 /// Per-process file descriptor table.
@@ -26,7 +27,6 @@ pub struct FdTable {
 
 impl FdTable {
     pub const fn new() -> Self {
-        // Can't use const None with generic Option<FileDescriptor>, so we init at runtime
         Self {
             fds: [
                 None, None, None, None,
@@ -39,8 +39,6 @@ impl FdTable {
 
     /// Allocate the next free FD slot. Returns the fd number or None.
     pub fn alloc_fd(&mut self) -> Option<usize> {
-        // FDs 0,1,2 are reserved for stdin/stdout/stderr conceptually
-        // but we start from 3 for file I/O
         for i in 3..MAX_FDS {
             if self.fds[i].is_none() {
                 return Some(i);
@@ -49,18 +47,18 @@ impl FdTable {
         None
     }
 
-    /// Open a file by reading it from FAT12 ramdisk.
+    /// Open a file by reading it from storage, or creating a new file when writable.
     pub fn open(&mut self, filename: &str, flags: u64) -> Option<usize> {
         let fd = self.alloc_fd()?;
-        let writable = flags & 1 != 0; // O_WRONLY or O_RDWR
+        let writable = flags & 1 != 0;
 
-        let data = if let Some(existing) = crate::fat32::read_file(filename) {
-            existing
-        } else if writable {
-            // Create new empty file if opening for write and file doesn't exist
+        let data = if writable {
+            // Truncate / create fresh buffer when writing a file
             Vec::new()
+        } else if let Some(existing) = crate::fat32::read_file(filename) {
+            existing
         } else {
-            return None; // File not found and read-only
+            return None;
         };
 
         self.fds[fd] = Some(FileDescriptor {
@@ -68,6 +66,7 @@ impl FdTable {
             data,
             offset: 0,
             writable,
+            dirty: writable,
         });
         Some(fd)
     }
@@ -100,26 +99,28 @@ impl FdTable {
                 return 0;
             }
             let to_write = count.min(buf.len());
-            // Extend file if writing past end
             let needed = file.offset + to_write;
             if needed > file.data.len() {
                 file.data.resize(needed, 0);
             }
             file.data[file.offset..file.offset + to_write].copy_from_slice(&buf[..to_write]);
             file.offset += to_write;
+            file.dirty = true;
             to_write
         } else {
             0
         }
     }
 
-    /// Close a file descriptor.
+    /// Close a file descriptor and flush modified buffers to storage.
     pub fn close(&mut self, fd: usize) -> bool {
         if fd >= MAX_FDS {
             return false;
         }
-        if self.fds[fd].is_some() {
-            self.fds[fd] = None;
+        if let Some(file) = self.fds[fd].take() {
+            if file.writable && file.dirty {
+                crate::fat32::write_file(&file.filename, &file.data);
+            }
             true
         } else {
             false

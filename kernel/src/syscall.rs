@@ -1,7 +1,6 @@
 use crate::ipc;
 use crate::process;
 use crate::scheduler;
-use crate::{serial_print, serial_println};
 
 /// Syscall numbers.
 pub const SYS_SEND: u64 = 1;
@@ -41,13 +40,13 @@ fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<allo
                 let byte = unsafe { *(crate::memory::paging::phys_to_virt(phys) as *const u8) };
                 name_bytes[i] = byte;
             } else {
-                return None; // Page fault while reading
+                return None;
             }
         }
         if let Ok(s) = core::str::from_utf8(&name_bytes[..len]) {
-             Some(alloc::string::String::from(s))
+            Some(alloc::string::String::from(s))
         } else {
-             None
+            None
         }
     } else {
         None
@@ -57,8 +56,6 @@ fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<allo
 use crate::process::InterruptContext;
 
 /// Handle a syscall. Called from the INT 0x80 handler.
-/// Arguments: rax=syscall number, rdi=arg1, rsi=arg2, rdx=arg3
-/// Returns the (potentially new) context pointer.
 pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
     let ctx = unsafe { &mut *context_ptr };
     let syscall_num = ctx.rax;
@@ -68,39 +65,44 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
     let arg4 = ctx.r10;
     let arg5 = ctx.r8;
     let arg6 = ctx.r9;
-    let arg7 = ctx.r11; // We can use up to 7 args via registers safely
+    let arg7 = ctx.r11;
 
     match syscall_num {
         SYS_SEND => {
             let to_pid = arg1 as usize;
             let msg_type = arg2;
             crate::serial_println!("[Kernel] SYS_SEND from PID {} to PID {}: type={:#X}", scheduler::current_pid(), to_pid, msg_type);
-            let success = ipc::send(to_pid, msg_type, arg3, arg4, arg5, arg6, arg7, 0); // 6 args payload
+            let success = ipc::send(to_pid, msg_type, arg3, arg4, arg5, arg6, arg7, 0);
             ctx.rax = if success { 0 } else { 1 };
             context_ptr
         }
         SYS_RECV => {
-            let msg_ptr = arg1 as *mut ipc::Message;
+            let msg_vaddr = arg1;
             let non_blocking = arg2 == 1;
-            
+            let pid = scheduler::current_pid();
+
             if let Some(msg) = ipc::try_receive() {
-                unsafe {
-                    core::ptr::write(msg_ptr, msg);
+                if let Some(proc) = process::get_process_mut(pid) {
+                    let msg_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            (&msg as *const ipc::Message) as *const u8,
+                            core::mem::size_of::<ipc::Message>(),
+                        )
+                    };
+                    write_user_bytes(proc.pml4_phys, msg_vaddr, msg_bytes);
                 }
                 ctx.rax = msg.sender as u64;
                 context_ptr
             } else if non_blocking {
-                // Non-blocking: return u64::MAX to indicate no message
                 ctx.rax = u64::MAX;
                 context_ptr
             } else {
-                // Blocking: block the process and retry when unblocked
                 scheduler::block_current();
                 ctx.rip -= 2;
                 scheduler::schedule(context_ptr)
             }
         }
-        SYS_EXIT => { // 6
+        SYS_EXIT => {
             crate::process::exit_process(scheduler::current_pid(), arg1);
             scheduler::schedule(context_ptr)
         }
@@ -117,21 +119,21 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let phys = arg2;
             let size = arg3;
             crate::serial_println!("[Kernel] SYS_MAP_PHYSICAL called by PID {} - virt={:#X} phys={:#X} size={:#X}", scheduler::current_pid(), virt, phys, size);
-            
+
             let start_virt = virt & !0xFFF;
             let start_phys = phys & !0xFFF;
             let end_virt = (virt + size + 0xFFF) & !0xFFF;
-            
+
             let mut v = start_virt;
             let mut p = start_phys;
-            
+
             while v < end_virt {
                 crate::memory::paging::map_page(v, p, crate::memory::paging::USER | crate::memory::paging::WRITABLE);
                 v += 0x1000;
                 p += 0x1000;
             }
-            
-            ctx.rax = 0; // Success
+
+            ctx.rax = 0;
             context_ptr
         }
         SYS_INB => {
@@ -161,7 +163,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_SBRK => {
-            // arg1 = increment (signed as i64)
             let increment = arg1 as i64;
             let pid = scheduler::current_pid();
             if let Some(proc) = process::get_process_mut(pid) {
@@ -171,8 +172,7 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
                 } else if increment > 0 {
                     let new_break = old_break + increment as u64;
                     let new_break_aligned = (new_break + 0xFFF) & !0xFFF;
-                    
-                    // Register a VMA for the new heap region
+
                     use crate::vma::{Vma, VmaFlags, VmaBacking};
                     proc.vmas.add(Vma {
                         start: (old_break + 0xFFF) & !0xFFF,
@@ -180,11 +180,10 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
                         flags: VmaFlags::USER | VmaFlags::READ | VmaFlags::WRITE,
                         backing: VmaBacking::Anonymous,
                     });
-                    
+
                     proc.heap_break = new_break;
-                    ctx.rax = old_break; // Return the OLD break (like POSIX sbrk)
+                    ctx.rax = old_break;
                 } else {
-                    // Shrinking not supported yet
                     ctx.rax = old_break;
                 }
             } else {
@@ -193,13 +192,12 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_MMAP => {
-            // arg1 = hint address (0 = kernel picks), arg2 = size, arg3 = flags
             let size = arg2;
             let pid = scheduler::current_pid();
             if let Some(proc) = process::get_process_mut(pid) {
                 let aligned_size = (size + 0xFFF) & !0xFFF;
                 let hint = if arg1 != 0 { arg1 } else { 0x2000_0000 };
-                
+
                 if let Some(addr) = proc.vmas.find_free_region(hint, aligned_size) {
                     use crate::vma::{Vma, VmaFlags, VmaBacking};
                     proc.vmas.add(Vma {
@@ -218,14 +216,11 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_MUNMAP => {
-            // arg1 = address, arg2 = size
             let addr = arg1 & !0xFFF;
             let size = (arg2 + 0xFFF) & !0xFFF;
             let pid = scheduler::current_pid();
             if let Some(proc) = process::get_process_mut(pid) {
-                // Remove matching VMA
                 proc.vmas.regions.retain(|v| !(v.start == addr && v.end == addr + size));
-                // Unmap pages
                 let mut page = addr;
                 while page < addr + size {
                     crate::memory::paging::unmap_page(page);
@@ -276,11 +271,10 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_SPAWN => {
-            // arg1 = filename_ptr (in user address space), arg2 = filename_len
             let filename_ptr = arg1;
             let filename_len = arg2 as usize;
             let pid = scheduler::current_pid();
-            
+
             let filename = read_user_string(filename_ptr, filename_len, pid);
             if let Some(filename) = filename {
                 match crate::fat32::read_file(&filename) {
@@ -309,23 +303,19 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let current = scheduler::current_pid();
             if let Some(child) = crate::process::get_process_mut(child_pid) {
                 if child.state == crate::process::ProcessState::Dead {
-                    // Child is dead, reap it
                     let code = child.exit_code.unwrap_or(0);
-                    child.state = crate::process::ProcessState::Empty; // Free slot
+                    child.state = crate::process::ProcessState::Empty;
                     ctx.rax = code;
                     context_ptr
                 } else {
-                    // Child is still alive, block parent
                     if let Some(parent) = crate::process::get_process_mut(current) {
                         parent.state = crate::process::ProcessState::Blocked;
                         parent.waiting_for_pid = Some(child_pid);
                     }
-                    // Rewind RIP so syscall executes again when unblocked
                     ctx.rip -= 2;
                     scheduler::schedule(context_ptr)
                 }
             } else {
-                // Child doesn't exist (already reaped or invalid pid)
                 ctx.rax = u64::MAX;
                 context_ptr
             }
@@ -334,15 +324,12 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let filename_ptr = arg1;
             let filename_len = arg2 as usize;
             let pid = scheduler::current_pid();
-            
+
             let filename = read_user_string(filename_ptr, filename_len, pid);
             if let Some(filename) = filename {
                 match crate::fat32::read_file(&filename) {
-                    Some(data) => {
+                    Some(_data) => {
                         crate::serial_println!("[EXECVE] Replacing PID {} with '{}'", pid, filename);
-                        // For now, replacing the address space natively is tricky.
-                        // We will just print failure and return MAX because microkernels prefer spawn.
-                        // Since we implemented SPAWN, EXECVE is less critical but stubbed here natively if needed later.
                         ctx.rax = u64::MAX;
                     }
                     None => ctx.rax = u64::MAX,
@@ -353,7 +340,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_OPEN => {
-            // arg1 = filename_ptr, arg2 = filename_len, arg3 = flags (0=RD, 1=WR)
             let pid = scheduler::current_pid();
             let filename = read_user_string(arg1, arg2 as usize, pid);
             if let Some(filename) = filename {
@@ -377,7 +363,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_READ => {
-            // arg1 = fd, arg2 = user_buf_ptr, arg3 = count
             let pid = scheduler::current_pid();
             let fd = arg1 as usize;
             let user_buf = arg2;
@@ -387,7 +372,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
                 let mut tmp_buf = alloc::vec![0u8; count.min(4096)];
                 let bytes_read = proc.fd_table.read(fd, &mut tmp_buf, count.min(4096));
                 if bytes_read > 0 {
-                    // Write bytes back to userspace
                     write_user_bytes(proc.pml4_phys, user_buf, &tmp_buf[..bytes_read]);
                 }
                 ctx.rax = bytes_read as u64;
@@ -397,7 +381,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_WRITE_FILE => {
-            // arg1 = fd, arg2 = user_buf_ptr, arg3 = count
             let pid = scheduler::current_pid();
             let fd = arg1 as usize;
             let user_buf = arg2;
@@ -405,7 +388,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
 
             if let Some(proc) = process::get_process_mut(pid) {
                 let pml4 = proc.pml4_phys;
-                // Read bytes from userspace
                 let mut tmp_buf = alloc::vec![0u8; count.min(4096)];
                 read_user_bytes(pml4, user_buf, &mut tmp_buf[..count.min(4096)]);
                 let bytes_written = proc.fd_table.write(fd, &tmp_buf[..count.min(4096)], count.min(4096));
@@ -416,7 +398,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_CLOSE => {
-            // arg1 = fd
             let pid = scheduler::current_pid();
             let fd = arg1 as usize;
             if let Some(proc) = process::get_process_mut(pid) {
@@ -427,7 +408,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_STAT => {
-            // arg1 = fd. Returns file size.
             let pid = scheduler::current_pid();
             let fd = arg1 as usize;
             if let Some(proc) = process::get_process_mut(pid) {
@@ -438,8 +418,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             context_ptr
         }
         SYS_LISTDIR => {
-            // arg1 = user_buf_ptr, arg2 = buf_size
-            // Writes null-terminated list of filenames separated by newlines
             let pid = scheduler::current_pid();
             let user_buf = arg1;
             let buf_size = arg2 as usize;
@@ -461,7 +439,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
         }
         SYS_SHUTDOWN => {
             crate::serial_println!("[Kernel] SYS_SHUTDOWN called by PID {} — Powering off via ACPI!", scheduler::current_pid());
-            // QEMU ACPI shutdown: write 0x2000 to port 0x604
             unsafe {
                 core::arch::asm!(
                     "out dx, ax",
@@ -470,7 +447,6 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
                     options(nomem, nostack, preserves_flags)
                 );
             }
-            // If we're still running, loop forever
             loop { core::hint::spin_loop(); }
         }
         SYS_GET_TIME => {

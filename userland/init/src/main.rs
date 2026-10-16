@@ -1,53 +1,52 @@
 #![no_std]
 #![no_main]
 
-use libhuseyn::{print, spawn, syscall, SYS_YIELD};
+use libhuseyn::{ipc, print, spawn, syscall, SYS_YIELD};
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    // Spawn Console Driver (we can't print anything yet!)
+    // 1. Spawn Console Driver (PID 2)
     let _ = spawn("console.elf");
 
-    // Yield to let console initialize BEFORE keyboard starts sending it data
+    // Yield briefly so console driver maps framebuffer before receiving logs
     unsafe { syscall(SYS_YIELD, 0, 0, 0, 0, 0, 0); }
     unsafe { syscall(SYS_YIELD, 0, 0, 0, 0, 0, 0); }
     unsafe { syscall(SYS_YIELD, 0, 0, 0, 0, 0, 0); }
 
-    // Now it's safe to print!
-    print!("[init] console.elf started.\n");
+    print!("[init] console.elf started (PID 2).\n");
 
-    // Spawn Keyboard Driver
-    print!("[init] Spawning keyboard.elf...\n");
+    // 2. Spawn Keyboard Driver (PID 3)
+    print!("[init] Spawning keyboard.elf (PID 3)...\n");
     match spawn("keyboard.elf") {
         Ok(_) => print!("[init]  -> Success\n"),
         Err(_) => print!("[init]  -> Failed to spawn keyboard.elf\n"),
     }
 
-    // Spawn Mouse Driver (PID 5)
-    print!("[init] Spawning mouse.elf...\n");
+    // 3. Spawn Mouse Driver (PID 4)
+    print!("[init] Spawning mouse.elf (PID 4)...\n");
     match spawn("mouse.elf") {
         Ok(_) => print!("[init]  -> Success\n"),
         Err(_) => print!("[init]  -> Failed to spawn mouse.elf\n"),
     }
 
-    // Spawn Compositor (PID 6)
-    print!("[init] Spawning comp.elf...\n");
+    // 4. Spawn Monolith Compositor (PID 5)
+    print!("[init] Spawning comp.elf (PID 5)...\n");
     match spawn("comp.elf") {
         Ok(_) => print!("[init]  -> Success\n"),
         Err(_) => print!("[init]  -> Failed to spawn comp.elf\n"),
     }
 
-    // Spawn GUI Terminal (PID 7)
-    print!("[init] Spawning term.elf...\n");
+    // 5. Spawn Monolith GUI Terminal (PID 6)
+    print!("[init] Spawning term.elf (PID 6)...\n");
     match spawn("term.elf") {
-        Ok(_) => print!("[init]  -> Success (PID: 7)\n"),
+        Ok(_) => print!("[init]  -> Success\n"),
         Err(_) => print!("[init]  -> Failed to spawn term.elf\n"),
     }
 
-    print!("[init] All services started. Init process going to sleep.\n");
+    print!("[init] All userland services online. Entering low-power sleep.\n");
 
-    // Init just hangs around as PID 1
+    // Block on IPC receive instead of busy-yielding so PID 1 consumes zero CPU cycles
     loop {
-        unsafe { syscall(SYS_YIELD, 0, 0, 0, 0, 0, 0); }
+        let _ = ipc::receive();
     }
 }

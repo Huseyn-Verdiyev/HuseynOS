@@ -4,108 +4,107 @@
 extern crate alloc;
 use alloc::vec;
 use alloc::vec::Vec;
-use libhuseyn::{get_fb_info, map_physical, ipc};
+use libhuseyn::{get_fb_info, map_physical, ipc, spawn};
 
-// ─── Layout Constants ───
+// ─── Layout Constants (HuseynOS Monolith UI) ───
 
 const CURSOR_SIZE: usize = 16;
-const TASKBAR_HEIGHT: usize = 32;
-const TITLE_BAR_HEIGHT: usize = 24;
+const TOPBAR_HEIGHT: usize = 24;
+const TITLE_BAR_HEIGHT: usize = 20;
 const BORDER_WIDTH: usize = 1;
-const CLOSE_BTN_SIZE: usize = 16;
+const CLOSE_BTN_SIZE: usize = 12;
 const CLOSE_BTN_MARGIN: usize = 4;
 
-// ─── Color Palette (Premium Dark Theme) ───
+// ─── Color Palette (HuseynOS Cyber-Monolith Theme) ───
+// Pure obsidian canvas, precision dot-grid, razor 1px cyan/slate borders, zero OS-clone clutter.
 
-// Wallpaper gradient endpoints
-const WALL_TOP_R: u8 = 10;   const WALL_TOP_G: u8 = 10;   const WALL_TOP_B: u8 = 30;
-const WALL_BOT_R: u8 = 40;   const WALL_BOT_G: u8 = 20;   const WALL_BOT_B: u8 = 80;
+const COLOR_BG_OBSIDIAN: u32       = 0xFF080A0F; // Deep obsidian background
+const COLOR_BG_GRID_DOT: u32       = 0xFF161D2A; // Subtle architectural grid dots
+const COLOR_BG_CROSSHAIR: u32      = 0xFF1F293A; // Telemetry corner markers
 
-// Taskbar
-const COLOR_TASKBAR_TOP: u32 = 0xFF1A1A2E;
-const COLOR_TASKBAR_LINE: u32 = 0xFF4A4A6A;
-const COLOR_POWER_BG: u32 = 0xFF8B0000;     // Dark red
+// Top Monolith Bar
+const COLOR_TOPBAR_BG: u32         = 0xFF0C1017;
+const COLOR_TOPBAR_LINE: u32       = 0xFF1E293B;
+const COLOR_ACCENT_CYAN: u32       = 0xFF00E5FF; // Primary signature accent
+const COLOR_ACCENT_AMBER: u32      = 0xFFFFB000; // Secondary telemetry accent
+const COLOR_PILL_BG: u32           = 0xFF131B26;
+const COLOR_PILL_BORDER: u32       = 0xFF26354A;
+const COLOR_POWER_BG: u32          = 0xFF2A1215;
+const COLOR_POWER_BORDER: u32      = 0xFFFF3355;
 
 // Window: Active
-const COLOR_TITLE_ACTIVE_TOP: u32 = 0xFF2D5A8A;   // Steel blue
-const COLOR_TITLE_ACTIVE_BOT: u32 = 0xFF1A3A5C;
-const COLOR_TITLE_TEXT_ACTIVE: u32 = 0xFFFFFFFF;
-const COLOR_BORDER_ACTIVE: u32 = 0xFF4A90D9;
+const COLOR_WIN_HEADER_ACTIVE: u32 = 0xFF0F1722;
+const COLOR_BORDER_ACTIVE: u32     = 0xFF00E5FF;
+const COLOR_TITLE_ACTIVE: u32      = 0xFFE2E8F0;
 
 // Window: Inactive
-const COLOR_TITLE_INACTIVE_TOP: u32 = 0xFF3A3A3A;
-const COLOR_TITLE_INACTIVE_BOT: u32 = 0xFF2A2A2A;
-const COLOR_TITLE_TEXT_INACTIVE: u32 = 0xFF888888;
-const COLOR_BORDER_INACTIVE: u32 = 0xFF555555;
+const COLOR_WIN_HEADER_INACT: u32  = 0xFF0B0E14;
+const COLOR_BORDER_INACTIVE: u32   = 0xFF222D3D;
+const COLOR_TITLE_INACTIVE: u32    = 0xFF64748B;
 
-// Close button
-const COLOR_CLOSE_BG: u32 = 0xFFCC3333;
-const COLOR_CLOSE_X: u32 = 0xFFFFFFFF;
+// Text
+const COLOR_TEXT_BRIGHT: u32       = 0xFFF1F5F9;
+const COLOR_TEXT_MUTED: u32        = 0xFF94A3B8;
+const COLOR_CLOSE_FG: u32          = 0xFFFF4466;
 
 // Cursor
-const COLOR_CURSOR: u32 = 0xFFFFFFFF;
-const COLOR_CURSOR_BORDER: u32 = 0xFF000000;
+const COLOR_CURSOR_MAIN: u32       = 0xFF00E5FF;
+const COLOR_CURSOR_CORE: u32       = 0xFFFFFFFF;
+const COLOR_CURSOR_OUTLINE: u32    = 0xFF05070A;
 
-// Clock / text
-const COLOR_CLOCK: u32 = 0xFFE0E0FF;
-const COLOR_POWER_TEXT: u32 = 0xFFFFFFFF;
-
-// 16x16 mouse cursor bitmap
+// Precision geometric cursor bitmap (1 = white core, 2 = dark outline, 3 = cyan accent)
 static CURSOR_BITMAP: [[u8; 16]; 16] = [
-    [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,2,0,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,2,0,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,2,0,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,2,0,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,1,2,0,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,1,1,2,0,0,0,0,0,0,0],
-    [2,1,1,1,1,1,1,1,1,2,0,0,0,0,0,0],
-    [2,1,1,1,1,1,2,2,2,2,2,0,0,0,0,0],
-    [2,1,1,2,1,1,2,0,0,0,0,0,0,0,0,0],
-    [2,1,2,0,2,1,1,2,0,0,0,0,0,0,0,0],
-    [2,2,0,0,2,1,1,2,0,0,0,0,0,0,0,0],
-    [2,0,0,0,0,2,1,1,2,0,0,0,0,0,0,0],
-    [0,0,0,0,0,2,2,2,2,0,0,0,0,0,0,0],
+    [3,3,3,2,0,0,0,0,0,0,0,0,0,0,0,0],
+    [3,1,1,3,2,0,0,0,0,0,0,0,0,0,0,0],
+    [3,1,1,1,3,2,0,0,0,0,0,0,0,0,0,0],
+    [2,3,1,1,1,3,2,0,0,0,0,0,0,0,0,0],
+    [0,2,3,1,1,1,3,2,0,0,0,0,0,0,0,0],
+    [0,0,2,3,1,1,1,3,2,0,0,0,0,0,0,0],
+    [0,0,0,2,3,1,1,1,3,2,0,0,0,0,0,0],
+    [0,0,0,0,2,3,1,1,1,3,2,0,0,0,0,0],
+    [0,0,0,0,0,2,3,1,1,3,2,0,0,0,0,0],
+    [0,0,0,0,0,0,2,3,1,2,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,2,3,0,3,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,3,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 ];
 
 // ─── Window Management ───
 
 struct Window {
     id: u64,
-    owner_pid: usize,     // PID of the process that created this window
+    owner_pid: usize,
     x: usize,
     y: usize,
-    width: usize,         // Client area width
-    height: usize,        // Client area height
+    float_x: usize,
+    float_y: usize,
+    width: usize,
+    height: usize,
     #[allow(dead_code)]
     shm_id: u32,
-    buffer: *const u32,   // Mapped SHM buffer (client pixels only)
-    title: [u8; 32],      // Window title (ASCII)
+    buffer: *const u32,
+    title: [u8; 32],
     title_len: usize,
 }
 
 impl Window {
-    /// Total width including borders
     fn total_width(&self) -> usize {
         self.width + 2 * BORDER_WIDTH
     }
-    /// Total height including title bar and borders
     fn total_height(&self) -> usize {
         self.height + TITLE_BAR_HEIGHT + 2 * BORDER_WIDTH
     }
-    /// Screen coordinates of the client area (where pixels from SHM are drawn)
     fn client_x(&self) -> usize { self.x + BORDER_WIDTH }
     fn client_y(&self) -> usize { self.y + TITLE_BAR_HEIGHT + BORDER_WIDTH }
 
-    /// Check if a point is inside the title bar
     fn hit_title_bar(&self, mx: usize, my: usize) -> bool {
         mx >= self.x && mx < self.x + self.total_width()
         && my >= self.y + BORDER_WIDTH && my < self.y + BORDER_WIDTH + TITLE_BAR_HEIGHT
     }
 
-    /// Check if a point is inside the close button
     fn hit_close_button(&self, mx: usize, my: usize) -> bool {
         let btn_x = self.x + self.total_width() - BORDER_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE;
         let btn_y = self.y + BORDER_WIDTH + (TITLE_BAR_HEIGHT - CLOSE_BTN_SIZE) / 2;
@@ -113,14 +112,11 @@ impl Window {
         && my >= btn_y && my < btn_y + CLOSE_BTN_SIZE
     }
 
-    /// Check if a point is anywhere inside the full window (including decorations)
     fn hit_anywhere(&self, mx: usize, my: usize) -> bool {
         mx >= self.x && mx < self.x + self.total_width()
         && my >= self.y && my < self.y + self.total_height()
     }
 }
-
-// ─── Drag State ───
 
 struct DragState {
     active: bool,
@@ -129,12 +125,10 @@ struct DragState {
     offset_y: i32,
 }
 
-// ─── Compositor ───
-
 struct Compositor {
     fb_ptr: *mut u32,
     backbuf: Vec<u32>,
-    bg_cache: Vec<u32>,   // Pre-rendered wallpaper + taskbar (static background)
+    bg_cache: Vec<u32>,
     width: usize,
     height: usize,
     pitch: usize,
@@ -147,6 +141,7 @@ struct Compositor {
     next_window_id: u64,
     alloc_vaddr: u64,
     drag: DragState,
+    tile_mode: bool,
     frame_count: u32,
 }
 
@@ -168,6 +163,7 @@ impl Compositor {
             next_window_id: 1,
             alloc_vaddr: 0xB000_0000_u64,
             drag: DragState { active: false, window_id: 0, offset_x: 0, offset_y: 0 },
+            tile_mode: false,
             frame_count: 0,
         }
     }
@@ -190,7 +186,6 @@ impl Compositor {
         self.backbuf = vec![0u32; pixel_count];
         self.bg_cache = vec![0u32; pixel_count];
 
-        // Pre-render the static background (wallpaper + taskbar) into bg_cache
         self.prerender_background();
     }
 
@@ -198,103 +193,77 @@ impl Compositor {
         let h = self.height;
         let w = self.width;
 
-        // Modern macOS Monterey-ish dark gradient
-        for y in 0..h {
-            let t = y as i32 * 255 / h.max(1) as i32;
-            let r = (20 + (50 - 20) * t / 255).clamp(0, 255) as u32;
-            let g = (25 + (15 - 25) * t / 255).clamp(0, 255) as u32;
-            let b = (45 + (85 - 45) * t / 255).clamp(0, 255) as u32;
-            let color = 0xFF000000 | (r << 16) | (g << 8) | b;
-            let row_start = y * w;
+        // 1. Fill deep obsidian base
+        for i in 0..(w * h) {
+            self.bg_cache[i] = COLOR_BG_OBSIDIAN;
+        }
+
+        // 2. Architectural precision dot-matrix grid (every 24px)
+        for y in (TOPBAR_HEIGHT + 16..h).step_by(24) {
+            let row = y * w;
+            for x in (16..w).step_by(24) {
+                self.bg_cache[row + x] = COLOR_BG_GRID_DOT;
+            }
+        }
+
+        // 3. Subtle engineering crosshairs at major intersections (every 120px)
+        for y in (TOPBAR_HEIGHT + 64..h.saturating_sub(32)).step_by(120) {
+            for x in (64..w.saturating_sub(32)).step_by(120) {
+                for d in 0..5 {
+                    let cx = x + d - 2;
+                    let cy = y + d - 2;
+                    if cx < w && y < h { self.bg_cache[y * w + cx] = COLOR_BG_CROSSHAIR; }
+                    if x < w && cy < h { self.bg_cache[cy * w + x] = COLOR_BG_CROSSHAIR; }
+                }
+            }
+        }
+
+        // 4. Top Monolith Strip
+        for y in 0..TOPBAR_HEIGHT {
+            let row = y * w;
             for x in 0..w {
-                self.bg_cache[row_start + x] = color;
+                self.bg_cache[row + x] = COLOR_TOPBAR_BG;
+            }
+        }
+        // Bottom hairline + left cyan signature bar
+        if TOPBAR_HEIGHT < h {
+            let line_row = (TOPBAR_HEIGHT - 1) * w;
+            for x in 0..w {
+                self.bg_cache[line_row + x] = COLOR_TOPBAR_LINE;
+            }
+            for x in 0..96.min(w) {
+                self.bg_cache[line_row + x] = COLOR_ACCENT_CYAN;
             }
         }
 
-        // Floating macOS-style Dock
-        let dock_h = 40;
-        let dock_w = 400.min(w - 40);
-        let dock_y = h.saturating_sub(dock_h + 10);
-        let dock_x = (w - dock_w) / 2;
-
-        let radius = 10;
-        for dy in 0..dock_h {
-            let py = dock_y + dy;
-            if py >= h { continue; }
-            for dx in 0..dock_w {
-                let px = dock_x + dx;
-                if px >= w { continue; }
-                
-                // Rounded corners (approximate circle)
-                if dx < radius && dy < radius {
-                    if (radius - dx) * (radius - dx) + (radius - dy) * (radius - dy) > radius * radius { continue; }
-                }
-                if dx >= dock_w - radius && dy < radius {
-                    let cx = dock_w - radius;
-                    if (dx - cx) * (dx - cx) + (radius - dy) * (radius - dy) > radius * radius { continue; }
-                }
-                if dx < radius && dy >= dock_h - radius {
-                    let cy = dock_h - radius;
-                    if (radius - dx) * (radius - dx) + (dy - cy) * (dy - cy) > radius * radius { continue; }
-                }
-                if dx >= dock_w - radius && dy >= dock_h - radius {
-                    let cx = dock_w - radius;
-                    let cy = dock_h - radius;
-                    if (dx - cx) * (dx - cx) + (dy - cy) * (dy - cy) > radius * radius { continue; }
-                }
-
-                // Translucent-looking glassy background (since no alpha blending, just hardcode color mix)
-                // Let's mix it manually with the background
-                let bg = self.bg_cache[py * w + px];
-                let r_bg = (bg >> 16) & 0xFF;
-                let g_bg = (bg >> 8) & 0xFF;
-                let b_bg = bg & 0xFF;
-                
-                // White overlay with 20% opacity
-                let a = 50; 
-                let inv_a = 255 - a;
-                let r = (255 * a + r_bg * inv_a) / 255;
-                let g = (255 * a + g_bg * inv_a) / 255;
-                let b = (255 * a + b_bg * inv_a) / 255;
-                
-                self.bg_cache[py * w + px] = 0xFF000000 | (r << 16) | (g << 8) | b;
-            }
-        }
-
-        // Add Apple-style top menu bar (glassy)
-        let menu_h = 24;
-        for py in 0..menu_h {
-            for px in 0..w {
-                let bg = self.bg_cache[py * w + px];
-                let r_bg = (bg >> 16) & 0xFF;
-                let g_bg = (bg >> 8) & 0xFF;
-                let b_bg = bg & 0xFF;
-                let a = 80; 
-                let inv_a = 255 - a;
-                let r = (20 * a + r_bg * inv_a) / 255;
-                let g = (20 * a + g_bg * inv_a) / 255;
-                let b = (30 * a + b_bg * inv_a) / 255;
-                self.bg_cache[py * w + px] = 0xFF000000 | (r << 16) | (g << 8) | b;
+        // Left cyan vertical pulse bar (3px wide)
+        for y in 4..(TOPBAR_HEIGHT - 4) {
+            for x in 8..11 {
+                self.bg_cache[y * w + x] = COLOR_ACCENT_CYAN;
             }
         }
 
         let mut cache = core::mem::take(&mut self.bg_cache);
-        // Apple-style bold top-left text
-        self.draw_text_into(&mut cache, 20, 8, "HuseynOS", 0xFFFFFFFF);
+        self.draw_text_into(&mut cache, 16, 8, "HUSEYN//OS", COLOR_TEXT_BRIGHT);
+        self.draw_text_into(&mut cache, 92, 8, "v1.0-MONOLITH", COLOR_TEXT_MUTED);
+
+        // Subtle bottom-left watermark
+        if h > 24 {
+            self.draw_text_into(&mut cache, 12, h - 14, "MICROKERNEL // X86_64 // ZERO-RING3-ISOLATION", COLOR_BG_CROSSHAIR);
+        }
         self.bg_cache = cache;
     }
 
-    /// Draw text into an arbitrary buffer (not self.backbuf)
     fn draw_text_into(&self, buf: &mut [u32], mut x: usize, y: usize, text: &str, color: u32) {
         let w = self.width;
         let h = self.height;
         for ch in text.bytes() {
-            let glyph = get_mini_glyph(ch);
+            let glyph = get_font_glyph(ch);
             for (row, &bits) in glyph.iter().enumerate() {
                 let py = y + row;
                 if py >= h { continue; }
-                for col in 0..5 {
-                    if (bits >> (4 - col)) & 1 != 0 {
+                for col in 0..6 {
+                    if (bits >> (5 - col)) & 1 != 0 {
                         let px = x + col;
                         if px < w {
                             buf[py * w + px] = color;
@@ -305,8 +274,6 @@ impl Compositor {
             x += 7;
         }
     }
-
-    // ─── Drawing Primitives ───
 
     #[inline]
     fn set_pixel(&mut self, x: usize, y: usize, color: u32) {
@@ -319,35 +286,24 @@ impl Compositor {
         for dy in 0..h {
             let py = y + dy;
             if py >= self.height { break; }
+            let row = py * self.width;
             for dx in 0..w {
                 let px = x + dx;
                 if px >= self.width { break; }
-                self.backbuf[py * self.width + px] = color;
+                self.backbuf[row + px] = color;
             }
         }
     }
 
-    /// Linear interpolation between two colors
-    fn lerp_color(c1: u32, c2: u32, t: u32, max: u32) -> u32 {
-        if max == 0 { return c1; }
-        let r1 = ((c1 >> 16) & 0xFF) as i32;
-        let g1 = ((c1 >> 8) & 0xFF) as i32;
-        let b1 = (c1 & 0xFF) as i32;
-        let r2 = ((c2 >> 16) & 0xFF) as i32;
-        let g2 = ((c2 >> 8) & 0xFF) as i32;
-        let b2 = (c2 & 0xFF) as i32;
-        let t = t as i32;
-        let max = max as i32;
-        let r = (r1 + (r2 - r1) * t / max).clamp(0, 255) as u32;
-        let g = (g1 + (g2 - g1) * t / max).clamp(0, 255) as u32;
-        let b = (b1 + (b2 - b1) * t / max).clamp(0, 255) as u32;
-        0xFF000000 | (r << 16) | (g << 8) | b
+    fn stroke_rect(&mut self, x: usize, y: usize, w: usize, h: usize, color: u32) {
+        if w == 0 || h == 0 { return; }
+        self.fill_rect(x, y, w, 1, color);
+        self.fill_rect(x, y + h - 1, w, 1, color);
+        self.fill_rect(x, y, 1, h, color);
+        self.fill_rect(x + w - 1, y, 1, h, color);
     }
 
-    // ─── Scene Drawing ───
-
     fn restore_background(&mut self) {
-        // Fast memcpy of pre-rendered background
         unsafe {
             core::ptr::copy_nonoverlapping(
                 self.bg_cache.as_ptr(),
@@ -357,100 +313,161 @@ impl Compositor {
         }
     }
 
-    fn draw_taskbar_dynamic(&mut self) {
-        // Draw Clock in the top-right menu bar
+    // ─── Top Bar Interactive Controls ───
+    // [+TERM] pill at x=200..256
+    // [MODE]  pill at x=264..328
+    // [PWR]   pill at x=width-46..width-8
+
+    fn hit_spawn_term_button(&self, mx: usize, my: usize) -> bool {
+        mx >= 200 && mx < 256 && my >= 4 && my < 20
+    }
+
+    fn hit_mode_button(&self, mx: usize, my: usize) -> bool {
+        mx >= 264 && mx < 328 && my >= 4 && my < 20
+    }
+
+    fn hit_power_button(&self, mx: usize, my: usize) -> bool {
+        let pw_x = self.width.saturating_sub(46);
+        mx >= pw_x && mx < pw_x + 38 && my >= 4 && my < 20
+    }
+
+    fn apply_layout(&mut self) {
+        let count = self.windows.len();
+        if count == 0 { return; }
+
+        if self.tile_mode {
+            let pad = 12;
+            let avail_w = self.width.saturating_sub(pad * 2);
+            let avail_h = self.height.saturating_sub(TOPBAR_HEIGHT + pad * 2);
+
+            for (i, win) in self.windows.iter_mut().enumerate() {
+                let cell_w = avail_w / count;
+                let cell_x = pad + i * cell_w;
+                let cx = cell_x + (cell_w.saturating_sub(win.total_width())) / 2;
+                let cy = TOPBAR_HEIGHT + pad + (avail_h.saturating_sub(win.total_height())) / 2;
+                win.x = cx;
+                win.y = cy;
+            }
+        } else {
+            for win in self.windows.iter_mut() {
+                win.x = win.float_x;
+                win.y = win.float_y;
+            }
+        }
+    }
+
+    fn draw_topbar_dynamic(&mut self) {
+        // 1. [+TERM] launcher button
+        self.fill_rect(200, 4, 56, 16, COLOR_PILL_BG);
+        self.stroke_rect(200, 4, 56, 16, COLOR_PILL_BORDER);
+        self.draw_text(207, 8, "+TERM", COLOR_ACCENT_CYAN);
+
+        // 2. [FLOAT / TILE] layout mode toggle button
+        self.fill_rect(264, 4, 64, 16, COLOR_PILL_BG);
+        self.stroke_rect(264, 4, 64, 16, if self.tile_mode { COLOR_ACCENT_AMBER } else { COLOR_PILL_BORDER });
+        if self.tile_mode {
+            self.draw_text(273, 8, "M:TILE", COLOR_ACCENT_AMBER);
+        } else {
+            self.draw_text(270, 8, "M:FLOAT", COLOR_TEXT_MUTED);
+        }
+
+        // 3. Active window telemetry indicator
+        let mut task_buf = [b'T', b'A', b'S', b'K', b'S', b':', b'0'];
+        let n = self.windows.len().min(9) as u8;
+        task_buf[6] = b'0' + n;
+        if let Ok(s) = core::str::from_utf8(&task_buf) {
+            self.draw_text(340, 8, s, COLOR_TEXT_MUTED);
+        }
+
+        // 4. Real-Time CMOS Date & Clock (YYYY.MM.DD // HH:MM:SS)
         let dt = libhuseyn::get_time();
-        let mut clock_buf = [0u8; 5];
+        let mut clock_buf = [0u8; 8];
         clock_buf[0] = b'0' + (dt.hour / 10);
         clock_buf[1] = b'0' + (dt.hour % 10);
         clock_buf[2] = b':';
         clock_buf[3] = b'0' + (dt.minute / 10);
         clock_buf[4] = b'0' + (dt.minute % 10);
-        let clock_x = self.width - 60;
+        clock_buf[5] = b':';
+        clock_buf[6] = b'0' + (dt.second / 10);
+        clock_buf[7] = b'0' + (dt.second % 10);
+
+        let clock_x = self.width.saturating_sub(114);
         if let Ok(clock_str) = core::str::from_utf8(&clock_buf) {
-            self.draw_text(clock_x, 8, clock_str, 0xFFFFFFFF); // White text
+            self.draw_text(clock_x, 8, clock_str, COLOR_TEXT_BRIGHT);
         }
 
-        // Power button (Red circle in top menu next to Clock)
-        let pw_x = self.width - 25;
-        let pw_y = 6;
-        self.fill_rect(pw_x, pw_y, 12, 12, 0xFFCC3333); 
-        self.draw_text(pw_x + 3, pw_y + 2, "X", 0xFFFFFFFF);
-    }
-
-    /// Returns true if (mx, my) is inside the power button
-    fn hit_power_button(&self, mx: usize, my: usize) -> bool {
-        let pw_x = self.width - 25;
-        let pw_y = 6;
-        mx >= pw_x && mx < pw_x + 12 && my >= pw_y && my < pw_y + 12
+        // 5. Minimalist [PWR] button
+        let pw_x = self.width.saturating_sub(46);
+        self.fill_rect(pw_x, 4, 38, 16, COLOR_POWER_BG);
+        self.stroke_rect(pw_x, 4, 38, 16, COLOR_POWER_BORDER);
+        self.draw_text(pw_x + 9, 8, "PWR", COLOR_CLOSE_FG);
     }
 
     fn draw_window_decorations(&mut self, win_idx: usize) {
         let is_active = win_idx == self.windows.len() - 1;
 
-        // Extract all values we need from the window before borrowing self mutably
         let win_x = self.windows[win_idx].x;
         let win_y = self.windows[win_idx].y;
         let win_width = self.windows[win_idx].width;
         let total_w = self.windows[win_idx].total_width();
         let total_h = self.windows[win_idx].total_height();
+        let owner_pid = self.windows[win_idx].owner_pid;
         let title_len = self.windows[win_idx].title_len;
         let mut title_copy = [0u8; 32];
         title_copy.copy_from_slice(&self.windows[win_idx].title);
 
         let border_color = if is_active { COLOR_BORDER_ACTIVE } else { COLOR_BORDER_INACTIVE };
-        let title_top = if is_active { COLOR_TITLE_ACTIVE_TOP } else { COLOR_TITLE_INACTIVE_TOP };
-        let title_bot = if is_active { COLOR_TITLE_ACTIVE_BOT } else { COLOR_TITLE_INACTIVE_BOT };
-        let title_text_color = if is_active { COLOR_TITLE_TEXT_ACTIVE } else { COLOR_TITLE_TEXT_INACTIVE };
+        let header_bg = if is_active { COLOR_WIN_HEADER_ACTIVE } else { COLOR_WIN_HEADER_INACT };
+        let title_color = if is_active { COLOR_TITLE_ACTIVE } else { COLOR_TITLE_INACTIVE };
 
-        // 1. Border (1px all around)
-        self.fill_rect(win_x, win_y, total_w, BORDER_WIDTH, border_color);
-        self.fill_rect(win_x, win_y + total_h - BORDER_WIDTH, total_w, BORDER_WIDTH, border_color);
-        self.fill_rect(win_x, win_y, BORDER_WIDTH, total_h, border_color);
-        self.fill_rect(win_x + total_w - BORDER_WIDTH, win_y, BORDER_WIDTH, total_h, border_color);
+        // 1. Razor 1px outer frame + subtle corner accents for active window
+        self.stroke_rect(win_x, win_y, total_w, total_h, border_color);
 
-        // 2. Title bar (gradient)
+        // 2. Flat minimalist header bar (no Windows/macOS gradients)
         let tb_x = win_x + BORDER_WIDTH;
         let tb_y = win_y + BORDER_WIDTH;
-        for dy in 0..TITLE_BAR_HEIGHT {
-            let color = Self::lerp_color(title_top, title_bot, dy as u32, TITLE_BAR_HEIGHT as u32);
-            for dx in 0..win_width {
-                self.set_pixel(tb_x + dx, tb_y + dy, color);
-            }
-        }
+        self.fill_rect(tb_x, tb_y, win_width, TITLE_BAR_HEIGHT - 1, header_bg);
+        // 1px divider line between header and client canvas
+        self.fill_rect(tb_x, tb_y + TITLE_BAR_HEIGHT - 1, win_width, 1, border_color);
 
-        // 3. Title text
+        // 3. Left status indicator bar inside header
+        let accent = if is_active { COLOR_ACCENT_CYAN } else { COLOR_BORDER_INACTIVE };
+        self.fill_rect(tb_x + 6, tb_y + 6, 4, 7, accent);
+
+        // 4. Title text + [PID:N] badge
         let text = if title_len > 0 {
             unsafe { core::str::from_utf8_unchecked(&title_copy[..title_len]) }
         } else {
-            "Window"
+            "node"
         };
-        self.draw_text(tb_x + 8, tb_y + 8, text, title_text_color);
+        self.draw_text(tb_x + 15, tb_y + 6, text, title_color);
 
-        // 4. Close button [X]
+        let mut pid_tag = [b'[', b'P', b'I', b'D', b':', b'0', b']'];
+        pid_tag[5] = b'0' + (owner_pid.min(9) as u8);
+        if let Ok(pid_str) = core::str::from_utf8(&pid_tag) {
+            let tag_x = tb_x + 15 + (text.len() + 1) * 7;
+            self.draw_text(tag_x, tb_y + 6, pid_str, COLOR_TEXT_MUTED);
+        }
+
+        // 5. Minimalist close button [x]
         let btn_x = win_x + total_w - BORDER_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE;
         let btn_y = win_y + BORDER_WIDTH + (TITLE_BAR_HEIGHT - CLOSE_BTN_SIZE) / 2;
-        self.fill_rect(btn_x, btn_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE, COLOR_CLOSE_BG);
-        for i in 0..CLOSE_BTN_SIZE {
-            self.set_pixel(btn_x + i, btn_y + i, COLOR_CLOSE_X);
-            self.set_pixel(btn_x + CLOSE_BTN_SIZE - 1 - i, btn_y + i, COLOR_CLOSE_X);
+        self.stroke_rect(btn_x, btn_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE, if is_active { COLOR_CLOSE_FG } else { COLOR_BORDER_INACTIVE });
+        for i in 3..(CLOSE_BTN_SIZE - 3) {
+            self.set_pixel(btn_x + i, btn_y + i, COLOR_CLOSE_FG);
+            self.set_pixel(btn_x + CLOSE_BTN_SIZE - 1 - i, btn_y + i, COLOR_CLOSE_FG);
         }
     }
 
     fn draw_windows(&mut self) {
-        let _win_count = self.windows.len();
-        // Collect window data to avoid borrow issues
         let mut win_data = Vec::new();
         for win in &self.windows {
             win_data.push((win.client_x(), win.client_y(), win.width, win.height, win.buffer));
         }
 
-        // Draw decorations + client area bottom-to-top
         for (idx, (cx, cy, cw, ch, buf)) in win_data.iter().enumerate() {
-            // Draw decorations first
             self.draw_window_decorations(idx);
 
-            // Draw client area pixels from SHM
             for y in 0..*ch {
                 let screen_y = cy + y;
                 if screen_y >= self.height { break; }
@@ -475,19 +492,18 @@ impl Compositor {
         for dy in 0..CURSOR_SIZE {
             for dx in 0..CURSOR_SIZE {
                 match CURSOR_BITMAP[dy][dx] {
-                    1 => self.set_pixel(cx + dx, cy + dy, COLOR_CURSOR),
-                    2 => self.set_pixel(cx + dx, cy + dy, COLOR_CURSOR_BORDER),
+                    1 => self.set_pixel(cx + dx, cy + dy, COLOR_CURSOR_CORE),
+                    2 => self.set_pixel(cx + dx, cy + dy, COLOR_CURSOR_OUTLINE),
+                    3 => self.set_pixel(cx + dx, cy + dy, COLOR_CURSOR_MAIN),
                     _ => {}
                 }
             }
         }
     }
 
-    // ─── Render ───
-
     fn render(&mut self) {
-        self.restore_background();    // Fast memcpy of cached wallpaper+taskbar
-        self.draw_taskbar_dynamic();  // Only clock + power button (dynamic)
+        self.restore_background();
+        self.draw_topbar_dynamic();
         self.draw_windows();
         self.draw_cursor();
         self.blit();
@@ -506,27 +522,23 @@ impl Compositor {
         }
     }
 
-    // ─── Text Rendering ───
-
     fn draw_text(&mut self, mut x: usize, y: usize, text: &str, color: u32) {
         for ch in text.bytes() {
-            self.draw_mini_char(x, y, ch, color);
+            self.draw_char(x, y, ch, color);
             x += 7;
         }
     }
 
-    fn draw_mini_char(&mut self, x: usize, y: usize, ch: u8, color: u32) {
-        let glyph = get_mini_glyph(ch);
+    fn draw_char(&mut self, x: usize, y: usize, ch: u8, color: u32) {
+        let glyph = get_font_glyph(ch);
         for (row, &bits) in glyph.iter().enumerate() {
-            for col in 0..5 {
-                if (bits >> (4 - col)) & 1 != 0 {
+            for col in 0..6 {
+                if (bits >> (5 - col)) & 1 != 0 {
                     self.set_pixel(x + col, y + row, color);
                 }
             }
         }
     }
-
-    // ─── Event Handling ───
 
     fn handle_message(&mut self, msg: &ipc::Message) {
         match msg.msg_type {
@@ -535,18 +547,18 @@ impl Compositor {
                 let new_y = msg.arg2 as i32;
                 self.mouse_buttons = msg.arg3 as u8;
 
-                // Handle dragging
-                if self.drag.active && (self.mouse_buttons & 1 != 0) {
-                    // Find the window being dragged
+                if self.drag.active && (self.mouse_buttons & 1 != 0) && !self.tile_mode {
                     if let Some(win) = self.windows.iter_mut().find(|w| w.id == self.drag.window_id) {
                         let new_win_x = new_x - self.drag.offset_x;
                         let new_win_y = new_y - self.drag.offset_y;
-                        // Clamp to screen bounds
-                        win.x = (new_win_x.max(0) as usize).min(self.width.saturating_sub(50));
-                        win.y = (new_win_y.max(0) as usize).min(self.height.saturating_sub(TASKBAR_HEIGHT + 10));
+                        let clamped_x = (new_win_x.max(0) as usize).min(self.width.saturating_sub(60));
+                        let clamped_y = (new_win_y.max(TOPBAR_HEIGHT as i32) as usize).min(self.height.saturating_sub(30));
+                        win.x = clamped_x;
+                        win.y = clamped_y;
+                        win.float_x = clamped_x;
+                        win.float_y = clamped_y;
                     }
                 } else if self.drag.active {
-                    // Button released, stop dragging
                     self.drag.active = false;
                 }
 
@@ -564,13 +576,22 @@ impl Compositor {
                     let mx = self.mouse_x as usize;
                     let my = self.mouse_y as usize;
 
-                    // 1. Check Power button first
+                    // 1. Topbar controls
                     if self.hit_power_button(mx, my) {
                         libhuseyn::shutdown();
                     }
+                    if self.hit_spawn_term_button(mx, my) {
+                        let _ = spawn("term.elf");
+                        return;
+                    }
+                    if self.hit_mode_button(mx, my) {
+                        self.tile_mode = !self.tile_mode;
+                        self.apply_layout();
+                        return;
+                    }
 
-                    // 2. Check windows in reverse Z-order (top first)
-                    let mut action: Option<(usize, bool, bool)> = None; // (idx, is_close, is_titlebar)
+                    // 2. Window interactions (reverse Z-order)
+                    let mut action: Option<(usize, bool, bool)> = None;
                     for i in (0..self.windows.len()).rev() {
                         let win = &self.windows[i];
                         if win.hit_close_button(mx, my) {
@@ -589,33 +610,31 @@ impl Compositor {
 
                     if let Some((idx, is_close, is_titlebar)) = action {
                         if is_close {
-                            // Send MSG_QUIT to the window's owner PID
                             let owner = self.windows[idx].owner_pid;
                             let mut quit_msg = ipc::Message::empty();
                             quit_msg.msg_type = ipc::MSG_QUIT;
                             ipc::send(owner, &quit_msg);
-                            // Remove the window from our list
                             self.windows.remove(idx);
+                            if self.tile_mode {
+                                self.apply_layout();
+                            }
                         } else if is_titlebar {
-                            // Bring to front
                             if idx < self.windows.len() - 1 {
                                 let win = self.windows.remove(idx);
                                 self.windows.push(win);
                             }
-                            // Start dragging (window is now last)
-                            let win = self.windows.last().unwrap();
-                            self.drag = DragState {
-                                active: true,
-                                window_id: win.id,
-                                offset_x: mx as i32 - win.x as i32,
-                                offset_y: my as i32 - win.y as i32,
-                            };
-                        } else {
-                            // Just bring to front (clicked client area)
-                            if idx < self.windows.len() - 1 {
-                                let win = self.windows.remove(idx);
-                                self.windows.push(win);
+                            if !self.tile_mode {
+                                let win = self.windows.last().unwrap();
+                                self.drag = DragState {
+                                    active: true,
+                                    window_id: win.id,
+                                    offset_x: mx as i32 - win.x as i32,
+                                    offset_y: my as i32 - win.y as i32,
+                                };
                             }
+                        } else if idx < self.windows.len() - 1 {
+                            let win = self.windows.remove(idx);
+                            self.windows.push(win);
                         }
                     }
                 }
@@ -631,22 +650,26 @@ impl Compositor {
                 let next_vaddr = (vaddr + bytes + 0xFFF) & !0xFFF;
 
                 if libhuseyn::shm_map(shm_id, vaddr).is_ok() {
-                    // Center the window on screen
                     let total_w = width + 2 * BORDER_WIDTH;
                     let total_h = height + TITLE_BAR_HEIGHT + 2 * BORDER_WIDTH;
                     let center_x = self.width.saturating_sub(total_w) / 2;
-                    let center_y = self.height.saturating_sub(TASKBAR_HEIGHT).saturating_sub(total_h) / 2;
+                    let center_y = TOPBAR_HEIGHT + (self.height.saturating_sub(TOPBAR_HEIGHT).saturating_sub(total_h)) / 2;
 
                     let mut title = [0u8; 32];
-                    let default_title = b"Terminal";
+                    let default_title = b"MONOLITH//TERM";
                     let len = default_title.len().min(32);
                     title[..len].copy_from_slice(&default_title[..len]);
+
+                    let fx = (center_x + self.windows.len() * 24).min(self.width.saturating_sub(total_w + 8));
+                    let fy = (center_y + self.windows.len() * 24).min(self.height.saturating_sub(total_h + 8));
 
                     let win = Window {
                         id: self.next_window_id,
                         owner_pid,
-                        x: center_x + self.windows.len() * 20, // Slight cascade
-                        y: center_y + self.windows.len() * 20,
+                        x: fx,
+                        y: fy,
+                        float_x: fx,
+                        float_y: fy,
                         width,
                         height,
                         shm_id,
@@ -657,6 +680,9 @@ impl Compositor {
                     self.windows.push(win);
                     self.next_window_id += 1;
                     self.alloc_vaddr = next_vaddr;
+                    if self.tile_mode {
+                        self.apply_layout();
+                    }
                     self.dirty = true;
                 }
             }
@@ -668,58 +694,109 @@ impl Compositor {
     }
 }
 
-// ─── Minimal 5x7 Font ───
+// ─── Full 6x8 Crisp Bitmap Font (Uppercase, Lowercase, Digits & Symbols) ───
 
-fn get_mini_glyph(ch: u8) -> [u8; 7] {
+fn get_font_glyph(ch: u8) -> [u8; 8] {
     match ch {
-        b'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        b'B' => [0b11110, 0b10001, 0b11110, 0b10001, 0b10001, 0b10001, 0b11110],
-        b'C' => [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110],
-        b'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
-        b'E' => [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b11111],
-        b'F' => [0b11111, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000, 0b10000],
-        b'G' => [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01110],
-        b'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        b'I' => [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        b'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100],
-        b'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
-        b'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        b'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
-        b'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
-        b'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        b'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
-        b'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
-        b'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
-        b'S' => [0b01110, 0b10001, 0b10000, 0b01110, 0b00001, 0b10001, 0b01110],
-        b'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
-        b'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        b'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b01010, 0b00100],
-        b'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001],
-        b'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
-        b'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
-        b'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
-        b'a'..=b'z' => get_mini_glyph(ch - 32),
-        b'0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
-        b'1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
-        b'2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
-        b'3' => [0b01110, 0b10001, 0b00001, 0b00110, 0b00001, 0b10001, 0b01110],
-        b'4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
-        b'5' => [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
-        b'6' => [0b01110, 0b10000, 0b11110, 0b10001, 0b10001, 0b10001, 0b01110],
-        b'7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
-        b'8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
-        b'9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
-        b' ' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000],
-        b'.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100],
-        b':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
-        b'-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
-        b'~' => [0b00000, 0b00000, 0b01000, 0b10101, 0b00010, 0b00000, 0b00000],
-        b'$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
-        _    => [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111],
+        // Uppercase
+        b'A' => [0b011100, 0b100010, 0b100010, 0b111110, 0b100010, 0b100010, 0b100010, 0],
+        b'B' => [0b111100, 0b100010, 0b111100, 0b100010, 0b100010, 0b100010, 0b111100, 0],
+        b'C' => [0b011100, 0b100010, 0b100000, 0b100000, 0b100000, 0b100010, 0b011100, 0],
+        b'D' => [0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b111100, 0],
+        b'E' => [0b111110, 0b100000, 0b111100, 0b100000, 0b100000, 0b100000, 0b111110, 0],
+        b'F' => [0b111110, 0b100000, 0b111100, 0b100000, 0b100000, 0b100000, 0b100000, 0],
+        b'G' => [0b011100, 0b100010, 0b100000, 0b101110, 0b100010, 0b100010, 0b011100, 0],
+        b'H' => [0b100010, 0b100010, 0b100010, 0b111110, 0b100010, 0b100010, 0b100010, 0],
+        b'I' => [0b011100, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0],
+        b'J' => [0b001110, 0b000100, 0b000100, 0b000100, 0b100100, 0b100100, 0b011000, 0],
+        b'K' => [0b100010, 0b100100, 0b101000, 0b110000, 0b101000, 0b100100, 0b100010, 0],
+        b'L' => [0b100000, 0b100000, 0b100000, 0b100000, 0b100000, 0b100000, 0b111110, 0],
+        b'M' => [0b100010, 0b110110, 0b101010, 0b101010, 0b100010, 0b100010, 0b100010, 0],
+        b'N' => [0b100010, 0b110010, 0b101010, 0b100110, 0b100010, 0b100010, 0b100010, 0],
+        b'O' => [0b011100, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b011100, 0],
+        b'P' => [0b111100, 0b100010, 0b100010, 0b111100, 0b100000, 0b100000, 0b100000, 0],
+        b'Q' => [0b011100, 0b100010, 0b100010, 0b100010, 0b101010, 0b100100, 0b011010, 0],
+        b'R' => [0b111100, 0b100010, 0b100010, 0b111100, 0b101000, 0b100100, 0b100010, 0],
+        b'S' => [0b011100, 0b100010, 0b100000, 0b011100, 0b000010, 0b100010, 0b011100, 0],
+        b'T' => [0b111110, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0],
+        b'U' => [0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b011100, 0],
+        b'V' => [0b100010, 0b100010, 0b100010, 0b100010, 0b010100, 0b010100, 0b001000, 0],
+        b'W' => [0b100010, 0b100010, 0b100010, 0b101010, 0b101010, 0b110110, 0b100010, 0],
+        b'X' => [0b100010, 0b100010, 0b010100, 0b001000, 0b010100, 0b100010, 0b100010, 0],
+        b'Y' => [0b100010, 0b100010, 0b010100, 0b001000, 0b001000, 0b001000, 0b001000, 0],
+        b'Z' => [0b111110, 0b000010, 0b000100, 0b001000, 0b010000, 0b100000, 0b111110, 0],
+
+        // Distinct Lowercase (a..z)
+        b'a' => [0b000000, 0b000000, 0b011100, 0b000010, 0b011110, 0b100010, 0b011110, 0],
+        b'b' => [0b100000, 0b100000, 0b111100, 0b100010, 0b100010, 0b100010, 0b111100, 0],
+        b'c' => [0b000000, 0b000000, 0b011100, 0b100010, 0b100000, 0b100010, 0b011100, 0],
+        b'd' => [0b000010, 0b000010, 0b011110, 0b100010, 0b100010, 0b100010, 0b011110, 0],
+        b'e' => [0b000000, 0b000000, 0b011100, 0b100010, 0b111110, 0b100000, 0b011100, 0],
+        b'f' => [0b001100, 0b010010, 0b010000, 0b111000, 0b010000, 0b010000, 0b010000, 0],
+        b'g' => [0b000000, 0b000000, 0b011110, 0b100010, 0b100010, 0b011110, 0b000010, 0b011100],
+        b'h' => [0b100000, 0b100000, 0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0],
+        b'i' => [0b001000, 0b000000, 0b011000, 0b001000, 0b001000, 0b001000, 0b011100, 0],
+        b'j' => [0b000100, 0b000000, 0b001100, 0b000100, 0b000100, 0b100100, 0b011000, 0],
+        b'k' => [0b100000, 0b100000, 0b100100, 0b101000, 0b110000, 0b101000, 0b100100, 0],
+        b'l' => [0b011000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0],
+        b'm' => [0b000000, 0b000000, 0b110100, 0b101010, 0b101010, 0b100010, 0b100010, 0],
+        b'n' => [0b000000, 0b000000, 0b111100, 0b100010, 0b100010, 0b100010, 0b100010, 0],
+        b'o' => [0b000000, 0b000000, 0b011100, 0b100010, 0b100010, 0b100010, 0b011100, 0],
+        b'p' => [0b000000, 0b000000, 0b111100, 0b100010, 0b100010, 0b111100, 0b100000, 0b100000],
+        b'q' => [0b000000, 0b000000, 0b011110, 0b100010, 0b100010, 0b011110, 0b000010, 0b000010],
+        b'r' => [0b000000, 0b000000, 0b101100, 0b110010, 0b100000, 0b100000, 0b100000, 0],
+        b's' => [0b000000, 0b000000, 0b011110, 0b100000, 0b011100, 0b000010, 0b111100, 0],
+        b't' => [0b010000, 0b010000, 0b111100, 0b010000, 0b010000, 0b010010, 0b001100, 0],
+        b'u' => [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b100010, 0b011110, 0],
+        b'v' => [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b010100, 0b001000, 0],
+        b'w' => [0b000000, 0b000000, 0b100010, 0b100010, 0b101010, 0b110110, 0b100010, 0],
+        b'x' => [0b000000, 0b000000, 0b100010, 0b010100, 0b001000, 0b010100, 0b100010, 0],
+        b'y' => [0b000000, 0b000000, 0b100010, 0b100010, 0b100010, 0b011110, 0b000010, 0b011100],
+        b'z' => [0b000000, 0b000000, 0b111110, 0b000100, 0b001000, 0b010000, 0b111110, 0],
+
+        // Digits
+        b'0' => [0b011100, 0b100010, 0b100110, 0b101010, 0b110010, 0b100010, 0b011100, 0],
+        b'1' => [0b001000, 0b011000, 0b001000, 0b001000, 0b001000, 0b001000, 0b011100, 0],
+        b'2' => [0b011100, 0b100010, 0b000010, 0b000100, 0b001000, 0b010000, 0b111110, 0],
+        b'3' => [0b011100, 0b100010, 0b000010, 0b001100, 0b000010, 0b100010, 0b011100, 0],
+        b'4' => [0b000100, 0b001100, 0b010100, 0b100100, 0b111110, 0b000100, 0b000100, 0],
+        b'5' => [0b111110, 0b100000, 0b111100, 0b000010, 0b000010, 0b100010, 0b011100, 0],
+        b'6' => [0b011100, 0b100000, 0b111100, 0b100010, 0b100010, 0b100010, 0b011100, 0],
+        b'7' => [0b111110, 0b000010, 0b000100, 0b001000, 0b010000, 0b010000, 0b010000, 0],
+        b'8' => [0b011100, 0b100010, 0b100010, 0b011100, 0b100010, 0b100010, 0b011100, 0],
+        b'9' => [0b011100, 0b100010, 0b100010, 0b011110, 0b000010, 0b000010, 0b011100, 0],
+
+        // Symbols & Punctuation
+        b' ' => [0; 8],
+        b'.' => [0, 0, 0, 0, 0, 0b001000, 0b001000, 0],
+        b',' => [0, 0, 0, 0, 0, 0b001000, 0b001000, 0b010000],
+        b':' => [0, 0b001000, 0b001000, 0, 0b001000, 0b001000, 0, 0],
+        b';' => [0, 0b001000, 0b001000, 0, 0b001000, 0b001000, 0b010000, 0],
+        b'-' => [0, 0, 0, 0b111110, 0, 0, 0, 0],
+        b'_' => [0, 0, 0, 0, 0, 0, 0b111110, 0],
+        b'+' => [0, 0b001000, 0b001000, 0b111110, 0b001000, 0b001000, 0, 0],
+        b'=' => [0, 0, 0b111110, 0, 0b111110, 0, 0, 0],
+        b'/' => [0b000010, 0b000100, 0b000100, 0b001000, 0b010000, 0b010000, 0b100000, 0],
+        b'\\' => [0b100000, 0b010000, 0b010000, 0b001000, 0b000100, 0b000100, 0b000010, 0],
+        b'|' => [0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0],
+        b'[' => [0b011100, 0b010000, 0b010000, 0b010000, 0b010000, 0b010000, 0b011100, 0],
+        b']' => [0b011100, 0b000100, 0b000100, 0b000100, 0b000100, 0b000100, 0b011100, 0],
+        b'(' => [0b000100, 0b001000, 0b010000, 0b010000, 0b010000, 0b001000, 0b000100, 0],
+        b')' => [0b010000, 0b001000, 0b000100, 0b000100, 0b000100, 0b001000, 0b010000, 0],
+        b'<' => [0b000100, 0b001000, 0b010000, 0b100000, 0b010000, 0b001000, 0b000100, 0],
+        b'>' => [0b100000, 0b010000, 0b001000, 0b000100, 0b001000, 0b010000, 0b100000, 0],
+        b'~' => [0, 0, 0b010000, 0b101010, 0b000100, 0, 0, 0],
+        b'$' => [0b001000, 0b011110, 0b101000, 0b011100, 0b001010, 0b111100, 0b001000, 0],
+        b'@' => [0b011100, 0b100010, 0b101110, 0b101010, 0b101110, 0b100000, 0b011100, 0],
+        b'!' => [0b001000, 0b001000, 0b001000, 0b001000, 0b001000, 0, 0b001000, 0],
+        b'?' => [0b011100, 0b100010, 0b000100, 0b001000, 0b001000, 0, 0b001000, 0],
+        b'*' => [0, 0b101010, 0b011100, 0b111110, 0b011100, 0b101010, 0, 0],
+        b'#' => [0b010100, 0b111110, 0b010100, 0b010100, 0b111110, 0b010100, 0, 0],
+        b'"' => [0b010100, 0b010100, 0, 0, 0, 0, 0, 0],
+        b'\'' => [0b001000, 0b001000, 0, 0, 0, 0, 0, 0],
+        _    => [0b111110, 0b100010, 0b100010, 0b100010, 0b100010, 0b100010, 0b111110, 0],
     }
 }
-
-// ─── Entry Point ───
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -728,12 +805,9 @@ pub extern "C" fn _start() -> ! {
     comp.render();
 
     loop {
-        // Block until at least one message arrives
         let msg = ipc::receive();
         comp.handle_message(&msg);
 
-        // Drain ALL pending messages before rendering (batch processing)
-        // This prevents rendering once per mouse-move event
         while let Some(msg) = ipc::try_receive() {
             comp.handle_message(&msg);
         }

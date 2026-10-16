@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod ata;
 mod fat32;
 mod gdt;
 mod idt;
@@ -21,7 +22,6 @@ mod syscall;
 mod vfs;
 mod vma;
 
-use alloc::vec;
 use core::arch::asm;
 use core::panic::PanicInfo;
 use limine::request::{
@@ -62,8 +62,6 @@ pub static FRAMEBUFFER_REQUEST: FramebufferRequest = FramebufferRequest::new();
 #[unsafe(link_section = ".requests")]
 static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(0x10000);
 
-// No inline test tasks here anymore, using shell::shell_task
-
 // ─── Kernel Entry Point ───
 
 #[unsafe(no_mangle)]
@@ -72,7 +70,7 @@ unsafe extern "C" fn kmain() -> ! {
     serial::init();
 
     println!("===========================================");
-    println!("  HuseynOS Beta v1.0.0 - Desktop Environment");
+    println!("  HuseynOS v1.0.0 - Monolith Microkernel");
     println!("  Architecture: x86_64");
     println!("===========================================");
     println!();
@@ -83,50 +81,50 @@ unsafe extern "C" fn kmain() -> ! {
         hcf();
     }
 
-    // Cihazları Axtar (Səmimi quraşdırıcı üçün ilk addım)
+    // 2. PCI Bus & Hardware Discovery
     pci::enumerate_pci();
 
-    // 2. GDT
+    // 3. GDT
     gdt::init();
     println!("[OK] GDT initialized");
 
-    // 3. IDT (must be initialized before PIC enables IRQs!)
+    // 4. IDT (must be initialized before PIC enables IRQs!)
     idt::init();
     println!("[OK] IDT initialized (256 entries + syscall 0x80)");
 
-    // 4. PIC
+    // 5. PIC
     pic::init();
     println!("[OK] PIC remapped (IRQs 32-47)");
 
-    // 5. PIT (Timer at 1000 Hz for Preemption)
+    // 6. PIT (Timer at 1000 Hz for Preemption)
     pit::init(1000);
 
-    // 5b. PS/2 Mouse
+    // 7. PS/2 Mouse
     idt::init_mouse();
 
-    // 4. FAT32 File System (via Ramdisk)
-    fat32::init();
-
-    // 4. Frame allocator
+    // 8. Frame allocator
     let mmap = MEMORY_MAP_REQUEST.get_response()
         .expect("No memory map from Limine");
     memory::FrameAllocator::init(mmap);
     println!("[OK] Frame allocator active");
 
-    // 5. Paging
+    // 9. Paging
     let hhdm = HHDM_REQUEST.get_response()
         .expect("No HHDM from Limine");
     memory::paging::init(hhdm.offset());
 
-    // 6. Heap
+    // 10. Heap
     memory::heap::init();
     println!("[OK] Heap initialized");
 
+    // 11. Hardware Block Storage (ATA/PIO) & FAT Volume
+    ata::init();
+    fat32::init();
 
-    // 7. Scheduler
+    // 12. Scheduler
     scheduler::init();
 
-    // 8. Spawn init process
+    // 13. Spawn init process
     if let Some(data) = fat32::read_file("init.elf") {
         if let Some(pid) = process::load_elf("init", &data, 0) {
             println!("[OK] Spawned init.elf (PID {})", pid);
@@ -137,27 +135,21 @@ unsafe extern "C" fn kmain() -> ! {
         println!("[ERROR] init.elf not found in root directory!");
     }
 
-    // 9. Enable interrupts
+    // 14. Enable interrupts
     idt::enable_interrupts();
-    println!("[OK] Interrupts enabled - OS ready!");
+    println!("[OK] Interrupts enabled - HuseynOS Monolith ready!");
     println!();
 
-    // Idle loop — PIT preemption handles scheduling automatically.
-    // We just hlt to save power; the timer will wake us and schedule tasks.
     loop {
         unsafe { asm!("hlt"); }
     }
 }
-
-// ─── Halt ───
 
 fn hcf() -> ! {
     loop {
         unsafe { asm!("hlt"); }
     }
 }
-
-// ─── Panic Handler ───
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

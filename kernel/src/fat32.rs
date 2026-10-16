@@ -1,5 +1,5 @@
 use limine::request::ModuleRequest;
-use crate::{serial_print, serial_println};
+use crate::serial_println;
 use core::slice;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -16,6 +16,8 @@ static mut FS_SIZE: usize = 0;
 
 /// Overlay store for newly created/modified files in HuseynOS (synced to ATA LBA 2048+ when disk is present).
 static OVERLAY_FILES: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+/// Track deleted filenames so `rm <file>` works across both overlay and boot volume files.
+static DELETED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// BPB (BIOS Parameter Block) specifically for FAT12/FAT16.
 #[repr(C, packed)]
@@ -108,6 +110,10 @@ fn print_summary() {
 /// Write or update a file in the HuseynOS storage layer (and flush to hardware ATA disk if attached).
 pub fn write_file(filename: &str, data: &[u8]) {
     let key = filename.to_uppercase();
+    {
+        let mut deleted = DELETED_FILES.lock();
+        deleted.retain(|d| *d != key);
+    }
     let mut overlay = OVERLAY_FILES.lock();
     if let Some(entry) = overlay.iter_mut().find(|(n, _)| *n == key) {
         entry.1 = data.to_vec();
@@ -116,7 +122,6 @@ pub fn write_file(filename: &str, data: &[u8]) {
     }
     drop(overlay);
 
-    // If hardware ATA disk is online, also flush the first sector to LBA 2048 for persistent block verification
     if crate::ata::is_available() {
         let mut sector = [0u8; 512];
         let copy_len = data.len().min(512);
@@ -125,8 +130,30 @@ pub fn write_file(filename: &str, data: &[u8]) {
     }
 }
 
-/// List all files in the root directory (merging boot volume + user-written files).
+/// Delete a file by name from the HuseynOS storage layer (`rm`).
+pub fn delete_file(filename: &str) -> bool {
+    let key = filename.to_uppercase();
+    let existed = read_file(&key).is_some();
+    if !existed {
+        return false;
+    }
+
+    {
+        let mut overlay = OVERLAY_FILES.lock();
+        overlay.retain(|(n, _)| *n != key);
+    }
+    {
+        let mut deleted = DELETED_FILES.lock();
+        if !deleted.iter().any(|d| *d == key) {
+            deleted.push(key);
+        }
+    }
+    true
+}
+
+/// List all files in the root directory (merging boot volume + user-written files, minus deleted files).
 pub fn list_files() -> Vec<(String, u32)> {
+    let deleted = DELETED_FILES.lock();
     let mut files = Vec::new();
     unsafe {
         if !FS_BASE.is_null() {
@@ -163,13 +190,18 @@ pub fn list_files() -> Vec<(String, u32)> {
                     s
                 };
 
-                files.push((full_name, {entry.file_size}));
+                if !deleted.iter().any(|d| *d == full_name) {
+                    files.push((full_name, {entry.file_size}));
+                }
             }
         }
     }
 
     let overlay = OVERLAY_FILES.lock();
     for (name, data) in overlay.iter() {
+        if deleted.iter().any(|d| *d == *name) {
+            continue;
+        }
         if let Some(existing) = files.iter_mut().find(|(n, _)| *n == *name) {
             existing.1 = data.len() as u32;
         } else {
@@ -183,6 +215,13 @@ pub fn list_files() -> Vec<(String, u32)> {
 /// Read a file by name from the overlay store or FAT boot directory.
 pub fn read_file(filename: &str) -> Option<Vec<u8>> {
     let search_name = filename.to_uppercase();
+
+    {
+        let deleted = DELETED_FILES.lock();
+        if deleted.iter().any(|d| *d == search_name) {
+            return None;
+        }
+    }
 
     {
         let overlay = OVERLAY_FILES.lock();

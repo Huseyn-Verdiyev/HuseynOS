@@ -1,4 +1,8 @@
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::arch::asm;
+use core::fmt::Write;
+use spin::Mutex;
 use crate::println;
 
 #[derive(Clone, Copy, Debug)]
@@ -14,6 +18,8 @@ pub struct PciDevice {
     pub bar0: u32,
     pub bar5: u32,
 }
+
+static PCI_DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
 
 /// Writes a 32-bit value to a PCI configuration port
 unsafe fn outl(port: u16, value: u32) {
@@ -57,6 +63,21 @@ pub fn pci_config_read_word(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
     ((tmp >> ((offset & 2) * 8)) & 0xFFFF) as u16
 }
 
+pub fn class_description(class_id: u8, subclass_id: u8) -> &'static str {
+    match (class_id, subclass_id) {
+        (0x01, 0x01) => "IDE/ATA Storage",
+        (0x01, 0x06) => "AHCI SATA 3.0",
+        (0x01, 0x08) => "NVMe Storage",
+        (0x02, 0x00) => "Ethernet NIC",
+        (0x03, 0x00) => "VGA/Framebuffer",
+        (0x06, 0x00) => "Host Bridge",
+        (0x06, 0x01) => "ISA Bridge",
+        (0x06, 0x80) => "PCI Bridge",
+        (0x0C, 0x03) => "USB xHCI/eHCI",
+        _ => "PCI Device",
+    }
+}
+
 fn check_function(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
     let vendor_id = pci_config_read_word(bus, slot, func, 0x00);
     if vendor_id == 0xFFFF {
@@ -74,19 +95,15 @@ fn check_function(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
     let bar5 = pci_config_read_dword(bus, slot, func, 0x24);
 
     println!(
-        "  [PCI {:02X}:{:02X}.{}] Vendor={:#06X} Device={:#06X} Class={:#04X}/{:#04X} BAR0={:#010X}",
-        bus, slot, func, vendor_id, device_id, class_id, subclass_id, bar0
+        "  [PCI {:02X}:{:02X}.{}] {:04X}:{:04X} ({}) BAR0={:#X}",
+        bus,
+        slot,
+        func,
+        vendor_id,
+        device_id,
+        class_description(class_id, subclass_id),
+        bar0
     );
-
-    match (class_id, subclass_id) {
-        (0x01, 0x01) => println!("    └─ [STORAGE] IDE/ATA Controller detected"),
-        (0x01, 0x06) => println!("    └─ [STORAGE] AHCI SATA 3.0 Controller detected (ABAR={:#010X})", bar5),
-        (0x01, 0x08) => println!("    └─ [STORAGE] NVMe Non-Volatile Memory Controller detected"),
-        (0x02, 0x00) => println!("    └─ [NETWORK] Ethernet Controller detected"),
-        (0x03, 0x00) => println!("    └─ [DISPLAY] VGA/Framebuffer Compatible Controller"),
-        (0x0C, 0x03) => println!("    └─ [USB]     xHCI/eHCI Universal Serial Bus Controller (ProgIF={:#04X})", prog_if),
-        _ => {}
-    }
 
     Some(PciDevice {
         bus,
@@ -107,7 +124,7 @@ pub fn enumerate_pci() {
     println!("  HuseynOS PCI Bus & Hardware Enumeration");
     println!("===========================================");
 
-    let mut found_devices = 0;
+    let mut found_list = Vec::new();
 
     for bus in 0..=255 {
         for slot in 0..32 {
@@ -116,22 +133,57 @@ pub fn enumerate_pci() {
                 continue;
             }
 
-            if check_function(bus, slot, 0).is_some() {
-                found_devices += 1;
+            if let Some(dev) = check_function(bus, slot, 0) {
+                found_list.push(dev);
             }
 
-            // Check Header Type bit 7 (multi-function device)
             let header_type = (pci_config_read_word(bus, slot, 0, 0x0E) & 0xFF) as u8;
             if (header_type & 0x80) != 0 {
                 for func in 1..8 {
-                    if check_function(bus, slot, func).is_some() {
-                        found_devices += 1;
+                    if let Some(dev) = check_function(bus, slot, func) {
+                        found_list.push(dev);
                     }
                 }
             }
         }
     }
 
-    println!("  [OK] PCI scan complete ({} hardware functions online)", found_devices);
+    println!("  [OK] PCI scan complete ({} functions online)", found_list.len());
     println!("===========================================\n");
+
+    let mut global = PCI_DEVICES.lock();
+    *global = found_list;
+}
+
+/// Return BAR5 of the first discovered AHCI SATA 3.0 controller, if any.
+pub fn find_ahci_bar5() -> Option<u32> {
+    let devs = PCI_DEVICES.lock();
+    for d in devs.iter() {
+        if d.class_id == 0x01 && d.subclass_id == 0x06 && d.bar5 != 0 {
+            return Some(d.bar5);
+        }
+    }
+    None
+}
+
+/// Format discovered PCI devices for `lspci` (`SYS_SYSINFO` mode 1).
+pub fn format_pci_list() -> String {
+    let devs = PCI_DEVICES.lock();
+    let mut out = String::new();
+    let _ = writeln!(out, "BDF       VEN:DEV    CLASS  TYPE");
+    for d in devs.iter() {
+        let _ = writeln!(
+            out,
+            "{:02X}:{:02X}.{}   {:04X}:{:04X}  {:02X}/{:02X}  {}",
+            d.bus,
+            d.slot,
+            d.func,
+            d.vendor_id,
+            d.device_id,
+            d.class_id,
+            d.subclass_id,
+            class_description(d.class_id, d.subclass_id)
+        );
+    }
+    out
 }

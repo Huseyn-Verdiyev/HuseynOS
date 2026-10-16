@@ -83,7 +83,6 @@ struct Window {
     float_y: usize,
     width: usize,
     height: usize,
-    #[allow(dead_code)]
     shm_id: u32,
     buffer: *const u32,
     title: [u8; 32],
@@ -225,7 +224,6 @@ impl Compositor {
                 self.bg_cache[row + x] = COLOR_TOPBAR_BG;
             }
         }
-        // Bottom hairline + left cyan signature bar
         if TOPBAR_HEIGHT < h {
             let line_row = (TOPBAR_HEIGHT - 1) * w;
             for x in 0..w {
@@ -236,7 +234,6 @@ impl Compositor {
             }
         }
 
-        // Left cyan vertical pulse bar (3px wide)
         for y in 4..(TOPBAR_HEIGHT - 4) {
             for x in 8..11 {
                 self.bg_cache[y * w + x] = COLOR_ACCENT_CYAN;
@@ -247,7 +244,6 @@ impl Compositor {
         self.draw_text_into(&mut cache, 16, 8, "HUSEYN//OS", COLOR_TEXT_BRIGHT);
         self.draw_text_into(&mut cache, 92, 8, "v1.0-MONOLITH", COLOR_TEXT_MUTED);
 
-        // Subtle bottom-left watermark
         if h > 24 {
             self.draw_text_into(&mut cache, 12, h - 14, "MICROKERNEL // X86_64 // ZERO-RING3-ISOLATION", COLOR_BG_CROSSHAIR);
         }
@@ -313,11 +309,6 @@ impl Compositor {
         }
     }
 
-    // ─── Top Bar Interactive Controls ───
-    // [+TERM] pill at x=200..256
-    // [MODE]  pill at x=264..328
-    // [PWR]   pill at x=width-46..width-8
-
     fn hit_spawn_term_button(&self, mx: usize, my: usize) -> bool {
         mx >= 200 && mx < 256 && my >= 4 && my < 20
     }
@@ -379,7 +370,7 @@ impl Compositor {
             self.draw_text(340, 8, s, COLOR_TEXT_MUTED);
         }
 
-        // 4. Real-Time CMOS Date & Clock (YYYY.MM.DD // HH:MM:SS)
+        // 4. Real-Time CMOS Clock (HH:MM:SS)
         let dt = libhuseyn::get_time();
         let mut clock_buf = [0u8; 8];
         clock_buf[0] = b'0' + (dt.hour / 10);
@@ -420,21 +411,16 @@ impl Compositor {
         let header_bg = if is_active { COLOR_WIN_HEADER_ACTIVE } else { COLOR_WIN_HEADER_INACT };
         let title_color = if is_active { COLOR_TITLE_ACTIVE } else { COLOR_TITLE_INACTIVE };
 
-        // 1. Razor 1px outer frame + subtle corner accents for active window
         self.stroke_rect(win_x, win_y, total_w, total_h, border_color);
 
-        // 2. Flat minimalist header bar (no Windows/macOS gradients)
         let tb_x = win_x + BORDER_WIDTH;
         let tb_y = win_y + BORDER_WIDTH;
         self.fill_rect(tb_x, tb_y, win_width, TITLE_BAR_HEIGHT - 1, header_bg);
-        // 1px divider line between header and client canvas
         self.fill_rect(tb_x, tb_y + TITLE_BAR_HEIGHT - 1, win_width, 1, border_color);
 
-        // 3. Left status indicator bar inside header
         let accent = if is_active { COLOR_ACCENT_CYAN } else { COLOR_BORDER_INACTIVE };
         self.fill_rect(tb_x + 6, tb_y + 6, 4, 7, accent);
 
-        // 4. Title text + [PID:N] badge
         let text = if title_len > 0 {
             unsafe { core::str::from_utf8_unchecked(&title_copy[..title_len]) }
         } else {
@@ -442,14 +428,21 @@ impl Compositor {
         };
         self.draw_text(tb_x + 15, tb_y + 6, text, title_color);
 
-        let mut pid_tag = [b'[', b'P', b'I', b'D', b':', b'0', b']'];
-        pid_tag[5] = b'0' + (owner_pid.min(9) as u8);
-        if let Ok(pid_str) = core::str::from_utf8(&pid_tag) {
-            let tag_x = tb_x + 15 + (text.len() + 1) * 7;
-            self.draw_text(tag_x, tb_y + 6, pid_str, COLOR_TEXT_MUTED);
+        let d1 = (owner_pid / 10) as u8;
+        let d0 = (owner_pid % 10) as u8;
+        let tag_x = tb_x + 15 + (text.len() + 1) * 7;
+        if d1 > 0 {
+            let pid_tag = [b'[', b'P', b'I', b'D', b':', b'0' + d1, b'0' + d0, b']'];
+            if let Ok(pid_str) = core::str::from_utf8(&pid_tag) {
+                self.draw_text(tag_x, tb_y + 6, pid_str, COLOR_TEXT_MUTED);
+            }
+        } else {
+            let pid_tag = [b'[', b'P', b'I', b'D', b':', b'0' + d0, b']'];
+            if let Ok(pid_str) = core::str::from_utf8(&pid_tag) {
+                self.draw_text(tag_x, tb_y + 6, pid_str, COLOR_TEXT_MUTED);
+            }
         }
 
-        // 5. Minimalist close button [x]
         let btn_x = win_x + total_w - BORDER_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE;
         let btn_y = win_y + BORDER_WIDTH + (TITLE_BAR_HEIGHT - CLOSE_BTN_SIZE) / 2;
         self.stroke_rect(btn_x, btn_y, CLOSE_BTN_SIZE, CLOSE_BTN_SIZE, if is_active { COLOR_CLOSE_FG } else { COLOR_BORDER_INACTIVE });
@@ -611,9 +604,12 @@ impl Compositor {
                     if let Some((idx, is_close, is_titlebar)) = action {
                         if is_close {
                             let owner = self.windows[idx].owner_pid;
+                            let shm_id = self.windows[idx].shm_id;
+                            let buf_vaddr = self.windows[idx].buffer as u64;
                             let mut quit_msg = ipc::Message::empty();
                             quit_msg.msg_type = ipc::MSG_QUIT;
                             ipc::send(owner, &quit_msg);
+                            let _ = libhuseyn::shm_unmap(shm_id, buf_vaddr);
                             self.windows.remove(idx);
                             if self.tile_mode {
                                 self.apply_layout();
@@ -637,6 +633,15 @@ impl Compositor {
                             self.windows.push(win);
                         }
                     }
+                }
+            }
+            ipc::MSG_KEY_PRESSED => {
+                // Route keyboard input to the currently focused (top Z-order) window
+                if let Some(active_win) = self.windows.last() {
+                    let mut fwd = ipc::Message::empty();
+                    fwd.msg_type = ipc::MSG_KEY_PRESSED;
+                    fwd.arg1 = msg.arg1;
+                    let _ = ipc::send(active_win.owner_pid, &fwd);
                 }
             }
             ipc::MSG_WINDOW_CREATE => {

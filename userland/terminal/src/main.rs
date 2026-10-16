@@ -29,6 +29,9 @@ const MUTED_COLOR: u32  = 0xFF64748B; // Telemetry & borders
 const CURSOR_COLOR: u32 = 0xFF00E5FF; // Block cursor
 
 const SYS_WRITE_FILE: u64 = 20;
+const SYS_UNLINK: u64     = 26;
+const SYS_PROCLIST: u64   = 27;
+const SYS_SYSINFO: u64    = 28;
 
 struct Terminal {
     buffer: *mut u32,
@@ -85,7 +88,7 @@ impl Terminal {
 
     fn print_banner(&mut self) {
         self.print_colored("HUSEYN//OS MONOLITH SHELL v1.0\n", CYAN_COLOR);
-        self.print_colored("Type 'help' for commands | 'ls' 'cat' 'write' 'sys' 'off'\n\n", MUTED_COLOR);
+        self.print_colored("Commands: help | ls | cat | write | rm | ps | mem | lspci | off\n\n", MUTED_COLOR);
     }
 
     fn print_prompt(&mut self) {
@@ -118,7 +121,6 @@ impl Terminal {
 
     fn clear_canvas(&mut self) {
         self.fill_rect(0, 0, WIDTH, HEIGHT, BG_COLOR);
-        // Subtle top inner accent line
         self.fill_rect(0, 0, WIDTH, 1, 0xFF162030);
         self.cursor_x = PAD_X;
         self.cursor_y = PAD_Y;
@@ -199,8 +201,12 @@ impl Terminal {
                 self.print_colored("  ls                  List files in storage\n", TEXT_COLOR);
                 self.print_colored("  cat <file>          Read and display file\n", TEXT_COLOR);
                 self.print_colored("  write <file> <txt>  Write persistent file\n", TEXT_COLOR);
+                self.print_colored("  rm <file>           Delete file from storage\n", TEXT_COLOR);
+                self.print_colored("  ps                  List active kernel tasks\n", TEXT_COLOR);
+                self.print_colored("  mem                 Show RAM & disk status\n", TEXT_COLOR);
+                self.print_colored("  lspci               Enumerate PCI hardware\n", TEXT_COLOR);
                 self.print_colored("  run <file.elf>      Spawn userland ELF binary\n", TEXT_COLOR);
-                self.print_colored("  sys                 Display kernel & RTC telemetry\n", TEXT_COLOR);
+                self.print_colored("  sys                 Display kernel & RTC info\n", TEXT_COLOR);
                 self.print_colored("  clear               Clear terminal viewport\n", TEXT_COLOR);
                 self.print_colored("  off                 ACPI hardware shutdown\n", TEXT_COLOR);
             }
@@ -280,6 +286,56 @@ impl Terminal {
                         Err(_) => {
                             self.print_colored("Error: failed to open file for writing\n", AMBER_COLOR);
                         }
+                    }
+                }
+            }
+            "rm" => {
+                if args.is_empty() {
+                    self.print_colored("Usage: rm <filename>\n", AMBER_COLOR);
+                } else {
+                    let fname = args[0];
+                    let res = unsafe {
+                        syscall(SYS_UNLINK, fname.as_ptr() as u64, fname.len() as u64, 0, 0, 0, 0)
+                    };
+                    if res == 0 {
+                        let mut msg = String::new();
+                        let _ = writeln!(msg, "[OK] Removed '{}'", fname);
+                        self.print_colored(&msg, CYAN_COLOR);
+                    } else {
+                        self.print_colored("Error: file not found\n", AMBER_COLOR);
+                    }
+                }
+            }
+            "ps" => {
+                let mut buf = [0u8; 1024];
+                let n = unsafe {
+                    syscall(SYS_PROCLIST, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0) as usize
+                };
+                if n > 0 && n <= buf.len() {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        self.print_colored(s, TEXT_COLOR);
+                    }
+                }
+            }
+            "mem" => {
+                let mut buf = [0u8; 1024];
+                let n = unsafe {
+                    syscall(SYS_SYSINFO, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0, 0, 0) as usize
+                };
+                if n > 0 && n <= buf.len() {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        self.print_colored(s, TEXT_COLOR);
+                    }
+                }
+            }
+            "lspci" | "pci" => {
+                let mut buf = [0u8; 1024];
+                let n = unsafe {
+                    syscall(SYS_SYSINFO, buf.as_mut_ptr() as u64, buf.len() as u64, 1, 0, 0, 0) as usize
+                };
+                if n > 0 && n <= buf.len() {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        self.print_colored(s, TEXT_COLOR);
                     }
                 }
             }

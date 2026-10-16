@@ -1,3 +1,5 @@
+use alloc::string::String;
+use core::fmt::Write;
 use crate::ipc;
 use crate::process;
 use crate::scheduler;
@@ -28,8 +30,11 @@ pub const SYS_STAT: u64 = 22;
 pub const SYS_LISTDIR: u64 = 23;
 pub const SYS_SHUTDOWN: u64 = 24;
 pub const SYS_GET_TIME: u64 = 25;
+pub const SYS_UNLINK: u64 = 26;
+pub const SYS_PROCLIST: u64 = 27;
+pub const SYS_SYSINFO: u64 = 28;
 
-fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<alloc::string::String> {
+fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<String> {
     if let Some(proc) = crate::process::get_process_mut(pid) {
         let pml4 = proc.pml4_phys;
         let mut name_bytes = [0u8; 128];
@@ -44,7 +49,7 @@ fn read_user_string(vaddr_start: u64, max_len: usize, pid: usize) -> Option<allo
             }
         }
         if let Ok(s) = core::str::from_utf8(&name_bytes[..len]) {
-            Some(alloc::string::String::from(s))
+            Some(String::from(s))
         } else {
             None
         }
@@ -280,7 +285,7 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
                 match crate::fat32::read_file(&filename) {
                     Some(data) => {
                         crate::serial_println!("[SPAWN] Loading '{}' ({} bytes)", filename, data.len());
-                        if let Some(child_pid) = crate::process::load_elf("elf_app", &data, pid) {
+                        if let Some(child_pid) = crate::process::load_elf(&filename, &data, pid) {
                             crate::serial_println!("[SPAWN] Spawned PID {} for '{}'", child_pid, filename);
                             ctx.rax = child_pid as u64;
                         } else {
@@ -423,9 +428,8 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             let buf_size = arg2 as usize;
 
             let files = crate::fat32::list_files();
-            let mut output = alloc::string::String::new();
+            let mut output = String::new();
             for (name, size) in &files {
-                use core::fmt::Write;
                 let _ = write!(output, "{} {}\n", name, size);
             }
             let bytes = output.as_bytes();
@@ -457,6 +461,65 @@ pub fn handle(context_ptr: *mut InterruptContext) -> *mut InterruptContext {
             ctx.rdx = dt.day as u64;
             ctx.r10 = dt.month as u64;
             ctx.r8 = dt.year as u64;
+            context_ptr
+        }
+        SYS_UNLINK => {
+            let pid = scheduler::current_pid();
+            if let Some(filename) = read_user_string(arg1, arg2 as usize, pid) {
+                ctx.rax = if crate::fat32::delete_file(&filename) { 0 } else { u64::MAX };
+            } else {
+                ctx.rax = u64::MAX;
+            }
+            context_ptr
+        }
+        SYS_PROCLIST => {
+            let pid = scheduler::current_pid();
+            let user_buf = arg1;
+            let buf_size = arg2 as usize;
+            let output = crate::process::format_process_list();
+            let bytes = output.as_bytes();
+            let to_copy = bytes.len().min(buf_size);
+
+            if let Some(proc) = process::get_process_mut(pid) {
+                write_user_bytes(proc.pml4_phys, user_buf, &bytes[..to_copy]);
+            }
+            ctx.rax = to_copy as u64;
+            context_ptr
+        }
+        SYS_SYSINFO => {
+            // arg1 = user_buf_ptr, arg2 = buf_size, arg3 = mode (0 = mem/storage, 1 = lspci)
+            let pid = scheduler::current_pid();
+            let user_buf = arg1;
+            let buf_size = arg2 as usize;
+            let mode = arg3;
+
+            let output = if mode == 1 {
+                crate::pci::format_pci_list()
+            } else {
+                let (total_f, used_f, free_f) = crate::memory::frame::FrameAllocator::stats();
+                let mut s = String::new();
+                let _ = writeln!(
+                    s,
+                    "Physical RAM : {} KiB total | {} KiB used | {} KiB free",
+                    total_f * 4,
+                    used_f * 4,
+                    free_f * 4
+                );
+                let _ = writeln!(
+                    s,
+                    "ATA PIO Disk : {}",
+                    if crate::ata::is_available() { "ONLINE (Primary Master LBA28)" } else { "STANDBY (RAM Overlay Active)" }
+                );
+                s.push_str(&crate::ahci::format_status());
+                s
+            };
+
+            let bytes = output.as_bytes();
+            let to_copy = bytes.len().min(buf_size);
+            if let Some(proc) = process::get_process_mut(pid) {
+                write_user_bytes(proc.pml4_phys, user_buf, &bytes[..to_copy]);
+            }
+            ctx.rax = to_copy as u64;
             context_ptr
         }
         _ => {

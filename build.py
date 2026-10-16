@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-HuseynOS Build System 
+HuseynOS Build System
 =====================
-Automates: compile kernel -> prepare Limine -> create bootable ISO
+Automates: compile kernel & userland -> prepare Limine -> create bootable ISO -> launch QEMU
 
 Usage:
-    python build.py              # Build ISO
+    python build.py              # Build kernel, userland, and ISO
     python build.py run          # Build ISO and launch in QEMU
     python build.py clean        # Clean build artifacts
 
-Works on Windows without xorriso — uses pycdlib (pure Python) for ISO creation.
+Works on macOS, Linux, and Windows without xorriso — uses pycdlib (pure Python) for ISO creation.
 """
 
 import os
 import sys
 import shutil
 import subprocess
-import struct
 from pathlib import Path
 
 try:
@@ -53,40 +52,39 @@ def find_tool(name: str, extra_paths: list[str] | None = None) -> str | None:
     found = shutil.which(name)
     if found:
         return found
-    
-    # Check common locations
+
     search_paths = extra_paths or []
     search_paths += [
         str(Path.home() / ".cargo" / "bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
         r"C:\Program Files\Git\bin",
         r"C:\Program Files\QEMU",
     ]
-    
+
     for p in search_paths:
         candidate = Path(p) / (name if not sys.platform == "win32" else f"{name}.exe")
         if candidate.exists():
             return str(candidate)
-    
+
     return None
 
 
-# ─── Step 1: Build Kernel ────────────────────────────────────────────────────
+# ─── Step 1: Build Kernel & Userland ─────────────────────────────────────────
 
 def step_build_kernel():
-    """Compile the kernel with Cargo."""
+    """Compile the kernel and all userland binaries."""
     print("\n" + "-" * 50)
     print("  [1/4] Building kernel and userland...")
     print("-" * 50)
-    
-    # We delegate to the PowerShell script because it sets up the correct RUSTFLAGS
-    # for each userland crate to avoid linker errors.
+
     print("  Delegating build to run_tests.sh...")
     run_cmd(["sh", "run_tests.sh"], cwd=PROJECT_ROOT)
-    
+
     if not KERNEL_BINARY.exists():
         print(f"  ERROR: Kernel binary not found at {KERNEL_BINARY}")
         sys.exit(1)
-    
+
     size_kb = KERNEL_BINARY.stat().st_size / 1024
     print(f"  OK: Kernel built: {KERNEL_BINARY.name} ({size_kb:.1f} KB)")
 
@@ -98,13 +96,13 @@ def step_get_limine():
     print("\n" + "-" * 50)
     print("  [2/4] Preparing Limine bootloader...")
     print("-" * 50)
-    
+
     if (LIMINE_DIR / "BOOTX64.EFI").exists():
         print("  OK: Limine already available, skipping download.")
         return
 
     BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    
+
     if not LIMINE_DIR.exists():
         git = find_tool("git")
         if git:
@@ -114,7 +112,7 @@ def step_get_limine():
         else:
             print("  ERROR: git not found! Install git and retry.")
             sys.exit(1)
-    
+
     print("  OK: Limine bootloader ready.")
 
 
@@ -125,7 +123,7 @@ def step_create_iso():
     print("\n" + "-" * 50)
     print("  [3/4] Creating bootable ISO (pycdlib)...")
     print("-" * 50)
-    
+
     iso = pycdlib.PyCdlib()
     iso.new(
         interchange_level=4,
@@ -133,15 +131,13 @@ def step_create_iso():
         rock_ridge="1.09",
         vol_ident="HUSEYNOS",
     )
-    
-    # interchange_level=4 allows long filenames in ISO9660 paths
-    
+
     import io
-    
+
     iso.add_directory("/boot", joliet_path="/boot", rr_name="boot")
     iso.add_directory("/EFI", joliet_path="/EFI", rr_name="EFI")
     iso.add_directory("/EFI/BOOT", joliet_path="/EFI/BOOT", rr_name="BOOT")
-    
+
     def add_file(src_path: Path, iso_path: str, joliet_path: str, rr_name: str):
         data = src_path.read_bytes()
         iso.add_fp(
@@ -152,12 +148,10 @@ def step_create_iso():
             rr_name=rr_name,
         )
         print(f"    + {rr_name} ({len(data) / 1024:.1f} KB)")
-    
-    # -- Add kernel binary --
+
     print("  Adding kernel...")
     add_file(KERNEL_BINARY, "/boot/kernel", "/boot/kernel", "kernel")
-    
-    # -- Add fs.img --
+
     fs_img_path = BUILD_DIR / "fs.img"
     if fs_img_path.exists():
         print("  Adding fs.img...")
@@ -165,7 +159,6 @@ def step_create_iso():
     else:
         print("  WARNING: fs.img not found, skipping.")
 
-    # -- Add limine.conf to root AND /boot --
     print("  Adding limine.conf...")
     limine_conf = PROJECT_ROOT / "limine.conf"
     add_file(limine_conf, "/limine.conf", "/limine.conf", "limine.conf")
@@ -176,35 +169,32 @@ def step_create_iso():
         joliet_path="/boot/limine.conf",
         rr_name="limine.conf",
     )
-    
-    # -- Add Limine bootloader files --
+
     print("  Adding Limine bootloader files...")
     limine_boot_files = {
         "limine-bios.sys":    ("/boot/limine-bios.sys",    "/boot/limine-bios.sys",    "limine-bios.sys"),
         "limine-bios-cd.bin": ("/boot/limine-bios-cd.bin", "/boot/limine-bios-cd.bin", "limine-bios-cd.bin"),
         "limine-uefi-cd.bin": ("/boot/limine-uefi-cd.bin", "/boot/limine-uefi-cd.bin", "limine-uefi-cd.bin"),
     }
-    
+
     for filename, (iso_p, joliet_p, rr_n) in limine_boot_files.items():
         src = LIMINE_DIR / filename
         if src.exists():
             add_file(src, iso_p, joliet_p, rr_n)
-    
-    # -- Add UEFI boot files --
+
     efi_files = {
         "BOOTX64.EFI":  ("/EFI/BOOT/BOOTX64.EFI",  "/EFI/BOOT/BOOTX64.EFI",  "BOOTX64.EFI"),
         "BOOTIA32.EFI": ("/EFI/BOOT/BOOTIA32.EFI", "/EFI/BOOT/BOOTIA32.EFI", "BOOTIA32.EFI"),
     }
-    
+
     for filename, (iso_p, joliet_p, rr_n) in efi_files.items():
         src = LIMINE_DIR / filename
         if src.exists():
             add_file(src, iso_p, joliet_p, rr_n)
-    
-    # -- El Torito boot records --
+
     bios_cd_bin = LIMINE_DIR / "limine-bios-cd.bin"
     uefi_cd_bin = LIMINE_DIR / "limine-uefi-cd.bin"
-    
+
     if bios_cd_bin.exists():
         print("  Setting up El Torito BIOS boot record...")
         iso.add_eltorito(
@@ -214,7 +204,7 @@ def step_create_iso():
             media_name="noemul",
             boot_info_table=True,
         )
-    
+
     if uefi_cd_bin.exists():
         print("  Adding UEFI El Torito boot entry...")
         iso.add_eltorito(
@@ -222,28 +212,14 @@ def step_create_iso():
             efi=True,
             media_name="noemul",
         )
-    
-    # ── Write ISO ──
+
     print(f"\n  Writing ISO to: {OUTPUT_ISO}")
     OUTPUT_ISO.parent.mkdir(parents=True, exist_ok=True)
     iso.write(str(OUTPUT_ISO))
     iso.close()
-    
+
     size_mb = OUTPUT_ISO.stat().st_size / (1024 * 1024)
     print(f"  OK: ISO created: {OUTPUT_ISO.name} ({size_mb:.1f} MB)")
-    
-    # ── Run limine bios-install (Windows .exe available) ──
-    limine_exe = LIMINE_DIR / "limine.exe"
-    if not limine_exe.exists():
-        limine_exe = LIMINE_DIR / "limine"
-    
-    if False:
-        print("  Installing Limine BIOS boot sector...")
-        run_cmd([str(limine_exe), "bios-install", str(OUTPUT_ISO)])
-        print("  OK: BIOS boot sector installed.")
-    else:
-        print("  WARNING: Skipping limine bios-install on Mac — BIOS boot may not work.")
-        print("    UEFI boot should still work in QEMU/VirtualBox.")
 
 
 # ─── Step 4: Run in QEMU ─────────────────────────────────────────────────────
@@ -252,13 +228,13 @@ def step_run_qemu():
     print("\n" + "-" * 50)
     print("  [4/4] Launching in QEMU...")
     print("-" * 50)
-    
+
     qemu = find_tool("qemu-system-x86_64")
     if not qemu:
         print("  QEMU not found. Skipping auto-launch.")
         print(f"  → Open VirtualBox, create a VM, and attach: {OUTPUT_ISO}")
         return
-    
+
     run_cmd([
         qemu, "-cdrom", str(OUTPUT_ISO),
         "-drive", "if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
@@ -288,9 +264,9 @@ def clean():
 
 def main():
     print("=" * 50)
-    print("  HuseynOS Build System v0.1")
+    print("  HuseynOS Build System v1.0")
     print("=" * 50)
-    
+
     if len(sys.argv) > 1:
         cmd = sys.argv[1].lower()
         if cmd == "clean":
@@ -309,12 +285,12 @@ def main():
             print(f"Unknown command: {cmd}")
             print("Usage: python build.py [run|run-qemu|clean]")
             sys.exit(1)
-    
-    # Default: build ISO
-    # step_build_kernel()  # Disabled to use native PowerShell compilation instead
+
+    # Default: build kernel, userland, and ISO
+    step_build_kernel()
     step_get_limine()
     step_create_iso()
-    
+
     print("\n" + "=" * 50)
     print("  OK: Build complete!")
     print(f"  ISO: {OUTPUT_ISO}")

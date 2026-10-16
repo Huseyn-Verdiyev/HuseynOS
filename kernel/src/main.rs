@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod ahci;
 mod ata;
 mod fat32;
 mod gdt;
@@ -81,43 +82,46 @@ unsafe extern "C" fn kmain() -> ! {
         hcf();
     }
 
-    // 2. PCI Bus & Hardware Discovery
-    pci::enumerate_pci();
-
-    // 3. GDT
+    // 2. GDT
     gdt::init();
     println!("[OK] GDT initialized");
 
-    // 4. IDT (must be initialized before PIC enables IRQs!)
+    // 3. IDT (must be initialized before PIC enables IRQs!)
     idt::init();
     println!("[OK] IDT initialized (256 entries + syscall 0x80)");
 
-    // 5. PIC
+    // 4. PIC
     pic::init();
     println!("[OK] PIC remapped (IRQs 32-47)");
 
-    // 6. PIT (Timer at 1000 Hz for Preemption)
+    // 5. PIT (Timer at 1000 Hz for Preemption)
     pit::init(1000);
 
-    // 7. PS/2 Mouse
+    // 6. PS/2 Mouse
     idt::init_mouse();
 
-    // 8. Frame allocator
+    // 7. Frame allocator
     let mmap = MEMORY_MAP_REQUEST.get_response()
         .expect("No memory map from Limine");
     memory::FrameAllocator::init(mmap);
     println!("[OK] Frame allocator active");
 
-    // 9. Paging
+    // 8. Paging
     let hhdm = HHDM_REQUEST.get_response()
         .expect("No HHDM from Limine");
     memory::paging::init(hhdm.offset());
 
-    // 10. Heap
+    // 9. Heap
     memory::heap::init();
     println!("[OK] Heap initialized");
 
-    // 11. Hardware Block Storage (ATA/PIO) & FAT Volume
+    // 10. PCI Bus & Hardware Discovery (requires Heap for device registry)
+    pci::enumerate_pci();
+
+    // 11. Hardware Block Storage (AHCI SATA 3.0 + ATA/PIO + FAT Volume)
+    if let Some(bar5) = pci::find_ahci_bar5() {
+        ahci::init(bar5);
+    }
     ata::init();
     fat32::init();
 
@@ -126,7 +130,7 @@ unsafe extern "C" fn kmain() -> ! {
 
     // 13. Spawn init process
     if let Some(data) = fat32::read_file("init.elf") {
-        if let Some(pid) = process::load_elf("init", &data, 0) {
+        if let Some(pid) = process::load_elf("init.elf", &data, 0) {
             println!("[OK] Spawned init.elf (PID {})", pid);
         } else {
             println!("[ERROR] Failed to load init.elf");

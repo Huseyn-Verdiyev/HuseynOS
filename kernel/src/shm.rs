@@ -18,6 +18,8 @@ pub struct SharedRegion {
     pub ref_count: usize,
     /// PID of the process that created this region.
     pub owner: usize,
+    /// True if the owner process has exited.
+    pub owner_exited: bool,
 }
 
 /// Global shared memory table.
@@ -34,15 +36,15 @@ pub fn create(size: usize, owner_pid: usize) -> Option<u32> {
     let mut frames = Vec::with_capacity(num_pages);
     for _ in 0..num_pages {
         if let Some(frame) = FrameAllocator::alloc() {
-            // Zero the frame
             unsafe {
                 let ptr = crate::memory::paging::phys_to_virt(frame) as *mut u8;
                 core::ptr::write_bytes(ptr, 0, PAGE_SIZE);
             }
             frames.push(frame);
         } else {
-            // Out of memory — free already allocated frames
-            // (We don't have frame free yet, so just fail)
+            for f in frames {
+                FrameAllocator::dealloc(f);
+            }
             return None;
         }
     }
@@ -58,10 +60,14 @@ pub fn create(size: usize, owner_pid: usize) -> Option<u32> {
         size: aligned_size,
         ref_count: 0,
         owner: owner_pid,
+        owner_exited: false,
     };
 
     let mut table = SHM_TABLE.lock();
     if table.len() >= MAX_SHM_REGIONS {
+        for &f in &region.frames {
+            FrameAllocator::dealloc(f);
+        }
         return None;
     }
     table.push(region);
@@ -70,9 +76,6 @@ pub fn create(size: usize, owner_pid: usize) -> Option<u32> {
 }
 
 /// Map a shared memory region into a process's address space.
-/// `pml4_phys` is the process's PML4 table.
-/// `virt_addr` is where to map the SHM in the process's virtual space.
-/// Returns 0 on success, or an error code.
 pub fn map(shm_id: u32, pml4_phys: u64, virt_addr: u64) -> Result<usize, ()> {
     let mut table = SHM_TABLE.lock();
     if let Some(region) = table.iter_mut().find(|r| r.id == shm_id) {
@@ -93,20 +96,49 @@ pub fn map(shm_id: u32, pml4_phys: u64, virt_addr: u64) -> Result<usize, ()> {
     }
 }
 
-/// Unmap a shared memory region from a process.
-pub fn unmap(shm_id: u32, pml4_phys: u64, virt_addr: u64) -> Result<(), ()> {
+/// Unmap a shared memory region from a process and reclaim physical frames if unused.
+pub fn unmap(shm_id: u32, _pml4_phys: u64, virt_addr: u64) -> Result<(), ()> {
     let mut table = SHM_TABLE.lock();
-    if let Some(region) = table.iter_mut().find(|r| r.id == shm_id) {
+    if let Some(idx) = table.iter().position(|r| r.id == shm_id) {
         let page_aligned_virt = virt_addr & !0xFFF;
-        for i in 0..region.frames.len() {
+        for i in 0..table[idx].frames.len() {
             let page_virt = page_aligned_virt + (i * PAGE_SIZE) as u64;
             crate::memory::paging::unmap_page(page_virt);
         }
-        if region.ref_count > 0 {
-            region.ref_count -= 1;
+        if table[idx].ref_count > 0 {
+            table[idx].ref_count -= 1;
+        }
+        // Reclaim physical frames if no mappings remain or owner has exited
+        if table[idx].ref_count <= 1 && table[idx].owner_exited {
+            let removed = table.remove(idx);
+            for frame in removed.frames {
+                FrameAllocator::dealloc(frame);
+            }
         }
         Ok(())
     } else {
         Err(())
+    }
+}
+
+/// Called when a process exits to mark its owned SHM regions and free unreferenced frames.
+pub fn cleanup_process(pid: usize) {
+    let mut table = SHM_TABLE.lock();
+    let mut i = 0;
+    while i < table.len() {
+        if table[i].owner == pid {
+            table[i].owner_exited = true;
+            if table[i].ref_count > 0 {
+                table[i].ref_count -= 1;
+            }
+            if table[i].ref_count == 0 {
+                let removed = table.remove(i);
+                for frame in removed.frames {
+                    FrameAllocator::dealloc(frame);
+                }
+                continue;
+            }
+        }
+        i += 1;
     }
 }

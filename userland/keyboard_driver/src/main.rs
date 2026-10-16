@@ -3,6 +3,9 @@
 
 use libhuseyn::ipc;
 
+/// Compositor PID (routes keyboard input to whichever window is currently focused).
+const COMPOSITOR_PID: usize = 5;
+
 const KEYMAP_NORMAL: [u8; 128] = [
     0, 27, b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', b'-', b'=', b'\x08', // 0x00 - 0x0E (0x08 = Backspace)
     b'\t', b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', b'[', b']', b'\n',    // 0x0F - 0x1C (0x1C = Enter)
@@ -12,7 +15,6 @@ const KEYMAP_NORMAL: [u8; 128] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    // Add 8 more to make 128
     0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
@@ -25,7 +27,6 @@ const KEYMAP_SHIFT: [u8; 128] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    // Add 8 more to make 128
     0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
@@ -64,7 +65,6 @@ fn translate_scancode(scancode: u8, state: &ModifierState) -> Option<u8> {
         return None;
     }
 
-    // Apply capslock (only to letters)
     let mut mapped = ascii;
     if state.capslock && mapped.is_ascii_alphabetic() {
         if mapped.is_ascii_lowercase() && !state.is_shifted() {
@@ -83,12 +83,10 @@ pub extern "C" fn _start() -> ! {
 
     loop {
         let msg = ipc::receive();
-        
-        // MSG_HARDWARE_INTERRUPT implies we got a scancode
+
         if msg.msg_type == ipc::MSG_HARDWARE_INTERRUPT {
             let scancode = msg.arg1 as u8;
 
-            // Check for key release (make/break code)
             if scancode >= 0x80 {
                 match scancode - 0x80 {
                     0x2A => state.lshift = false,
@@ -98,20 +96,18 @@ pub extern "C" fn _start() -> ! {
                 continue;
             }
 
-            // Key presses
             match scancode {
                 0x2A => state.lshift = true,
                 0x36 => state.rshift = true,
                 0x3A => state.capslock = !state.capslock,
                 _ => {
                     if let Some(ascii) = translate_scancode(scancode, &state) {
-                        // Forward ASCII char to GUI Terminal (PID 6)
+                        // Send key event to Compositor (PID 5), which routes it to the focused window
                         let mut out_msg = ipc::Message::empty();
                         out_msg.msg_type = ipc::MSG_KEY_PRESSED;
                         out_msg.arg1 = ascii as u64;
-                        
-                        // Keep trying until mailbox isn't full
-                        while !ipc::send(6, &out_msg) {
+
+                        while !ipc::send(COMPOSITOR_PID, &out_msg) {
                             libhuseyn::yield_now();
                         }
                     }
@@ -120,4 +116,3 @@ pub extern "C" fn _start() -> ! {
         }
     }
 }
-

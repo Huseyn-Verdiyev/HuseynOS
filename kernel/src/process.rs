@@ -1,4 +1,6 @@
 use alloc::boxed::Box;
+use alloc::string::String;
+use core::fmt::Write;
 use crate::vma::VmaList;
 use crate::vfs::FdTable;
 
@@ -57,14 +59,16 @@ pub struct Process {
     pub context: Context,
     pub stack: Option<Box<[u8; KERNEL_STACK_SIZE]>>,
     pub name: &'static str,
-    pub pml4_phys: u64, // The physical address of this process's PML4 table
-    pub kernel_stack_top: u64, // The top of the kernel stack, for TSS RSP0
-    pub vmas: VmaList,  // Virtual memory areas for demand paging
-    pub heap_break: u64, // Current program break for sbrk()
-    pub parent_pid: Pid, // PID of the parent process (0 if init/kernel)
-    pub exit_code: Option<u64>, // Exit code when the process terminates
-    pub waiting_for_pid: Option<Pid>, // PID this process is blocked waiting for
-    pub fd_table: FdTable, // Per-process file descriptor table
+    pub title: [u8; 16],
+    pub title_len: usize,
+    pub pml4_phys: u64,
+    pub kernel_stack_top: u64,
+    pub vmas: VmaList,
+    pub heap_break: u64,
+    pub parent_pid: Pid,
+    pub exit_code: Option<u64>,
+    pub waiting_for_pid: Option<Pid>,
+    pub fd_table: FdTable,
 }
 
 impl Process {
@@ -75,7 +79,9 @@ impl Process {
             context: Context::empty(),
             stack: None,
             name: "",
-            pml4_phys: 0, // 0 means use the kernel's default PML4
+            title: [0u8; 16],
+            title_len: 0,
+            pml4_phys: 0,
             kernel_stack_top: 0,
             vmas: VmaList::new(),
             heap_break: 0,
@@ -83,6 +89,14 @@ impl Process {
             exit_code: None,
             waiting_for_pid: None,
             fd_table: FdTable::new(),
+        }
+    }
+
+    pub fn display_name(&self) -> &str {
+        if self.title_len > 0 {
+            core::str::from_utf8(&self.title[..self.title_len]).unwrap_or(self.name)
+        } else {
+            self.name
         }
     }
 }
@@ -95,27 +109,23 @@ static mut PROCESS_TABLE: [Option<Process>; MAX_PROCESSES] = {
 
 static mut NEXT_PID: Pid = 1;
 
-/// Entry trampoline — called by a new task, wraps the actual entry fn.
-/// This ensures proper stack alignment and calls the real function.
 fn task_entry_trampoline() {
-    // The real entry fn pointer is stored in r12 by spawn()
     let entry_fn: fn();
     unsafe {
         core::arch::asm!("mov {}, r12", out(reg) entry_fn);
     }
     entry_fn();
-    // If task returns, mark it as Dead and yield
     crate::process::exit_process(crate::scheduler::current_pid(), 0);
     loop { crate::scheduler::yield_now(); }
 }
 
 /// Spawn a new kernel task. `entry` is the function to run.
+#[allow(dead_code)]
 pub fn spawn(name: &'static str, entry: fn()) -> Pid {
     unsafe {
         let pid = NEXT_PID;
         NEXT_PID += 1;
 
-        // Allocate kernel stack safely on the heap without blowing up the local stack
         let stack_ptr = alloc::alloc::alloc_zeroed(core::alloc::Layout::new::<[u8; KERNEL_STACK_SIZE]>())
             as *mut [u8; KERNEL_STACK_SIZE];
         if stack_ptr.is_null() {
@@ -124,33 +134,29 @@ pub fn spawn(name: &'static str, entry: fn()) -> Pid {
         let stack = Box::from_raw(stack_ptr);
         let stack_base = stack.as_ptr() as u64;
         let mut stack_top = stack_base + KERNEL_STACK_SIZE as u64;
-
-        // Align stack to 16 bytes
         stack_top &= !0xF;
 
-        // Allocate space for InterruptContext
         let context_size = core::mem::size_of::<InterruptContext>() as u64;
         let context_ptr = (stack_top - context_size) as *mut InterruptContext;
-        
-        // Zero it out
         core::ptr::write_bytes(context_ptr, 0, 1);
-        
+
         let ctx_obj = &mut *context_ptr;
-        ctx_obj.ds = 0x10; // Kernel Data Segment
-        ctx_obj.es = 0x10; // Kernel Data Segment
-        ctx_obj.ss = 0x10; // Kernel Data Segment
+        ctx_obj.ds = 0x10;
+        ctx_obj.es = 0x10;
+        ctx_obj.ss = 0x10;
         ctx_obj.rsp = stack_top;
-        ctx_obj.rflags = 0x202; // IF enabled
-        ctx_obj.cs = 0x08; // Kernel Code Segment
-        ctx_obj.rip = task_entry_trampoline as u64;
-        
-        // Passing the entry function pointer to the trampoline via r12
-        ctx_obj.r12 = entry as u64;
-        
-        // The context pointer that isr_common will restore from
+        ctx_obj.rflags = 0x202;
+        ctx_obj.cs = 0x08;
+        ctx_obj.rip = task_entry_trampoline as *const () as u64;
+        ctx_obj.r12 = entry as usize as u64;
+
         let ctx = Context {
             rsp: context_ptr as u64,
         };
+
+        let mut title = [0u8; 16];
+        let tlen = name.len().min(16);
+        title[..tlen].copy_from_slice(&name.as_bytes()[..tlen]);
 
         let proc = Process {
             pid,
@@ -158,17 +164,18 @@ pub fn spawn(name: &'static str, entry: fn()) -> Pid {
             context: ctx,
             stack: Some(stack),
             name,
+            title,
+            title_len: tlen,
             pml4_phys: 0,
             kernel_stack_top: stack_top,
             vmas: VmaList::new(),
             heap_break: 0,
-            parent_pid: 0, // Kernel tasks have no user parent
+            parent_pid: 0,
             exit_code: None,
             waiting_for_pid: None,
             fd_table: FdTable::new(),
         };
 
-        // Find empty slot
         for slot in PROCESS_TABLE.iter_mut() {
             if slot.is_none() {
                 *slot = Some(proc);
@@ -195,10 +202,7 @@ pub fn get_process_mut(pid: Pid) -> Option<&'static mut Process> {
 }
 
 /// Load an ELF binary as a User Mode (Ring 3) Process with demand paging.
-/// We register VMAs for each segment and only eagerly map pages that contain
-/// the entry point — the rest is demand-paged via page faults.
-pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<Pid> {
-    use alloc::vec::Vec;
+pub fn load_elf(name: &str, elf_data: &[u8], parent_pid: Pid) -> Option<Pid> {
     use crate::vma::{Vma, VmaList, VmaFlags, VmaBacking};
 
     let parser = crate::elf::ElfParser::new(elf_data)?;
@@ -206,12 +210,8 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
         let pid = NEXT_PID;
         NEXT_PID += 1;
 
-        // 1. Create a new Page Table (PML4) for this process
         let pml4_phys = crate::memory::paging::create_user_page_table();
 
-        // 2. Register VMAs for ELF segments and eagerly map all pages
-        //    (Demand paging for ELF is tricky because we don't keep the ELF data around.
-        //     We eagerly map now, but use VMAs for stack/heap which ARE demand-paged.)
         let mut max_vaddr: u64 = 0;
         let mut vmas = VmaList::new();
 
@@ -224,33 +224,29 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
             let start_page = vaddr & !0xFFF;
             let end_page = (vaddr + memsz as u64 + 0xFFF) & !0xFFF;
 
-            // Track the max virtual address for heap placement
             if end_page > max_vaddr {
                 max_vaddr = end_page;
             }
 
-            // Determine VMA flags from ELF segment flags
             let mut flags = VmaFlags::USER | VmaFlags::READ;
-            if phdr.p_flags & 0x2 != 0 { // PF_W
+            if phdr.p_flags & 0x2 != 0 {
                 flags = flags | VmaFlags::WRITE;
             }
-            if phdr.p_flags & 0x1 != 0 { // PF_X
+            if phdr.p_flags & 0x1 != 0 {
                 flags = flags | VmaFlags::EXEC;
             }
 
-            // Register VMA
             vmas.add(Vma {
                 start: start_page,
                 end: end_page,
                 flags,
-                backing: VmaBacking::Anonymous, // we eagerly map below
+                backing: VmaBacking::Anonymous,
             });
 
-            // Eagerly map all ELF segment pages (data must be copied now)
             let mut current_vaddr = start_page;
             while current_vaddr < end_page {
                 let frame = if let Some(existing_frame) = crate::memory::paging::get_mapped_frame(pml4_phys, current_vaddr) {
-                    existing_frame
+                    existing_frame & !0xFFF
                 } else if let Some(new_frame) = crate::memory::frame::FrameAllocator::alloc() {
                     crate::memory::paging::map_page_in_table(
                         pml4_phys,
@@ -258,38 +254,37 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
                         new_frame,
                         crate::memory::paging::WRITABLE | crate::memory::paging::USER,
                     );
-                    
+
                     let ptr = crate::memory::paging::phys_to_virt(new_frame) as *mut u8;
                     core::ptr::write_bytes(ptr, 0, crate::memory::frame::PAGE_SIZE);
-                    
+
                     new_frame
                 } else {
                     return None;
                 };
 
                 let ptr = crate::memory::paging::phys_to_virt(frame) as *mut u8;
+                let start = core::cmp::max(vaddr, current_vaddr);
+                let end_data = core::cmp::min(vaddr + filesz as u64, current_vaddr + crate::memory::frame::PAGE_SIZE as u64);
 
-                    let start = core::cmp::max(vaddr, current_vaddr);
-                    let end_data = core::cmp::min(vaddr + filesz as u64, current_vaddr + crate::memory::frame::PAGE_SIZE as u64);
+                if start < end_data {
+                    let copy_len = (end_data - start) as usize;
+                    let src_offset = offset + (start - vaddr) as usize;
+                    let dst_offset = (start - current_vaddr) as usize;
 
-                    if start < end_data {
-                        let copy_len = (end_data - start) as usize;
-                        let src_offset = offset + (start - vaddr) as usize;
-                        let dst_offset = (start - current_vaddr) as usize;
-                        
-                        core::ptr::copy_nonoverlapping(
-                            elf_data[src_offset..].as_ptr(),
-                            ptr.add(dst_offset),
-                            copy_len,
-                        );
-                    }
+                    core::ptr::copy_nonoverlapping(
+                        elf_data[src_offset..].as_ptr(),
+                        ptr.add(dst_offset),
+                        copy_len,
+                    );
+                }
                 current_vaddr += crate::memory::frame::PAGE_SIZE as u64;
             }
         }
 
-        // 3. User Stack — DEMAND PAGED (only register VMA, allocate on fault)
+        // User Stack — DEMAND PAGED
         let user_stack_top: u64 = 0x0000_7FFF_FFFF_0000;
-        let stack_size: u64 = 256 * 1024; // 256 KiB virtual stack
+        let stack_size: u64 = 256 * 1024;
         let user_stack_bottom = user_stack_top - stack_size;
 
         vmas.add(Vma {
@@ -299,7 +294,6 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
             backing: VmaBacking::Anonymous,
         });
 
-        // Eagerly map only the top 2 pages of the stack (the part touching RSP)
         for i in 0..2u64 {
             let page_vaddr = user_stack_top - (i + 1) * crate::memory::frame::PAGE_SIZE as u64;
             if let Some(frame) = crate::memory::frame::FrameAllocator::alloc() {
@@ -309,36 +303,34 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
                     frame,
                     crate::memory::paging::WRITABLE | crate::memory::paging::USER,
                 );
-                core::ptr::write_bytes(crate::memory::paging::phys_to_virt(frame) as *mut u8, 0, crate::memory::frame::PAGE_SIZE);
+                core::ptr::write_bytes(
+                    crate::memory::paging::phys_to_virt(frame) as *mut u8,
+                    0,
+                    crate::memory::frame::PAGE_SIZE,
+                );
             }
         }
 
-        // 4. Set heap break just after the last ELF segment (page-aligned)
         let heap_break = (max_vaddr + 0xFFF) & !0xFFF;
 
-        // 5. Kernel Stack (for processing syscalls/interrupts for this process)
         let stack_ptr = alloc::alloc::alloc_zeroed(core::alloc::Layout::new::<[u8; KERNEL_STACK_SIZE]>())
             as *mut [u8; KERNEL_STACK_SIZE];
         if stack_ptr.is_null() {
             crate::serial_println!("[ERROR] alloc_zeroed failed for kernel stack");
-            return None; // Out of memory
+            return None;
         }
         let stack = Box::from_raw(stack_ptr);
         let stack_base = stack.as_ptr() as u64;
         let mut stack_top = stack_base + KERNEL_STACK_SIZE as u64;
         stack_top &= !0xF;
 
-        // 6. Build InterruptContext
         let context_size = core::mem::size_of::<InterruptContext>() as u64;
         let context_ptr = (stack_top - context_size) as *mut InterruptContext;
         core::ptr::write_bytes(context_ptr, 0, 1);
-        
-        crate::serial_println!("[DEBUG] Setting up Context...");
-        
+
         let ctx_obj = &mut *context_ptr;
-        
         use crate::gdt::{USER_DATA_SEL, USER_CODE_SEL};
-        
+
         ctx_obj.ds = (USER_DATA_SEL | 3) as u64;
         ctx_obj.es = (USER_DATA_SEL | 3) as u64;
         ctx_obj.ss = (USER_DATA_SEL | 3) as u64;
@@ -346,19 +338,23 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
         ctx_obj.rflags = 0x202;
         ctx_obj.cs = (USER_CODE_SEL | 3) as u64;
         ctx_obj.rip = parser.entry_point();
-        
+
         let ctx = Context {
             rsp: context_ptr as u64,
         };
 
-        crate::serial_println!("[DEBUG] Building Process struct...");
-        
+        let mut title = [0u8; 16];
+        let tlen = name.len().min(16);
+        title[..tlen].copy_from_slice(&name.as_bytes()[..tlen]);
+
         let proc = Process {
             pid,
             state: ProcessState::Ready,
             context: ctx,
             stack: Some(stack),
-            name,
+            name: "elf",
+            title,
+            title_len: tlen,
             pml4_phys,
             kernel_stack_top: stack_top,
             vmas,
@@ -369,21 +365,11 @@ pub fn load_elf(name: &'static str, elf_data: &[u8], parent_pid: Pid) -> Option<
             fd_table: FdTable::new(),
         };
 
-        if let Some(frame) = crate::memory::paging::get_mapped_frame(pml4_phys, 0x400000) {
-            let ptr = crate::memory::paging::phys_to_virt(frame) as *const u8;
-            unsafe {
-                crate::serial_println!("[DEBUG] Bytes at 0x400060: {:02x} {:02x} {:02x} {:02x}", 
-                    *ptr.add(0x60), *ptr.add(0x61), *ptr.add(0x62), *ptr.add(0x63));
-            }
-        }
-
-        unsafe {
-            for slot in PROCESS_TABLE.iter_mut() {
-                if slot.is_none() {
-                    *slot = Some(proc);
-                    crate::serial_println!("[DEBUG] Successfully spawned process {}", name);
-                    return Some(pid);
-                }
+        for slot in PROCESS_TABLE.iter_mut() {
+            if slot.is_none() || slot.as_ref().map_or(false, |p| p.state == ProcessState::Empty) {
+                *slot = Some(proc);
+                crate::serial_println!("[OK] Spawned process '{}' (PID {})", name, pid);
+                return Some(pid);
             }
         }
         crate::serial_println!("[ERROR] PROCESS_TABLE is full");
@@ -417,37 +403,79 @@ pub fn next_ready(current_pid: Pid) -> Option<Pid> {
     }
 }
 
-/// Mark a process as Dead, save its exit code, and wake any waiting parent.
+/// Reclaim a process's user VMA physical frames, SHM mappings, and wake waiting parents.
 pub fn exit_process(pid: Pid, code: u64) {
-    unsafe {
-        if let Some(p) = get_process_mut(pid) {
-            p.state = ProcessState::Dead;
-            p.exit_code = Some(code);
-            crate::serial_println!("[Process] PID {} exited with code {}", pid, code);
-        }
+    crate::shm::cleanup_process(pid);
 
-        // Find any process blocked waiting for THIS pid to exit
+    unsafe {
+        let mut parent_waiting = false;
         for slot in PROCESS_TABLE.iter_mut() {
             if let Some(ref mut p) = slot {
                 if p.state == ProcessState::Blocked && p.waiting_for_pid == Some(pid) {
                     p.state = ProcessState::Ready;
                     p.waiting_for_pid = None;
+                    parent_waiting = true;
                     crate::serial_println!("[Process] Waking parent PID {}", p.pid);
                 }
             }
         }
+
+        if let Some(p) = get_process_mut(pid) {
+            // Reclaim all physical frames mapped inside this process's user VMAs
+            if p.pml4_phys != 0 {
+                for vma in &p.vmas.regions {
+                    let mut vaddr = vma.start & !0xFFF;
+                    while vaddr < vma.end {
+                        if let Some(phys) = crate::memory::paging::get_mapped_frame(p.pml4_phys, vaddr) {
+                            let frame_base = phys & !0xFFF;
+                            crate::memory::frame::FrameAllocator::dealloc(frame_base);
+                        }
+                        vaddr += crate::memory::frame::PAGE_SIZE as u64;
+                    }
+                }
+            }
+            p.vmas.clear();
+
+            if parent_waiting {
+                p.state = ProcessState::Dead;
+                p.exit_code = Some(code);
+            } else {
+                // Immediately free the slot if no parent is waiting in waitpid()
+                p.state = ProcessState::Empty;
+                p.exit_code = Some(code);
+            }
+            crate::serial_println!("[Process] PID {} exited with code {} (frames reclaimed)", pid, code);
+        }
     }
 }
 
-/// Count of alive (Ready/Running/Blocked) processes.
-pub fn alive_count() -> usize {
+/// Format active processes as a table for `ps` (`SYS_PROCLIST`).
+pub fn format_process_list() -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "PID   PPID  STATE     VMAs  NAME");
     unsafe {
-        PROCESS_TABLE.iter()
-            .filter(|s| s.as_ref().map_or(false, |p| {
-                p.state == ProcessState::Ready
-                    || p.state == ProcessState::Running
-                    || p.state == ProcessState::Blocked
-            }))
-            .count()
+        for slot in PROCESS_TABLE.iter() {
+            if let Some(ref p) = slot {
+                if p.state != ProcessState::Empty {
+                    let st = match p.state {
+                        ProcessState::Ready => "READY",
+                        ProcessState::Running => "RUNNING",
+                        ProcessState::Blocked => "BLOCKED",
+                        ProcessState::Dead => "ZOMBIE",
+                        ProcessState::Empty => "EMPTY",
+                    };
+                    let _ = writeln!(
+                        out,
+                        "{:<5} {:<5} {:<9} {:<5} {}",
+                        p.pid,
+                        p.parent_pid,
+                        st,
+                        p.vmas.regions.len(),
+                        p.display_name()
+                    );
+                }
+            }
+        }
     }
+    out
 }

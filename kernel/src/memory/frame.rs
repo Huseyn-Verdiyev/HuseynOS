@@ -1,4 +1,4 @@
-use crate::{serial_print, serial_println};
+use crate::serial_println;
 use limine::memory_map::EntryType;
 use limine::response::MemoryMapResponse;
 use spin::Mutex;
@@ -23,7 +23,7 @@ struct FrameAllocatorInner {
 impl FrameAllocatorInner {
     const fn new() -> Self {
         Self {
-            bitmap: [0xFF; BITMAP_SIZE], // All marked as used initially
+            bitmap: [0xFF; BITMAP_SIZE],
             total_frames: 0,
             used_frames: 0,
         }
@@ -73,7 +73,7 @@ impl FrameAllocatorInner {
 
     fn dealloc(&mut self, phys_addr: u64) {
         let frame = (phys_addr / PAGE_SIZE as u64) as usize;
-        if !self.is_free(frame) {
+        if frame < MAX_FRAMES && !self.is_free(frame) {
             self.mark_free(frame);
             if self.used_frames > 0 {
                 self.used_frames -= 1;
@@ -128,6 +128,13 @@ impl FrameAllocator {
     /// Get count of free frames.
     pub fn free_count() -> usize {
         let alloc = FRAME_ALLOC.lock();
-        alloc.total_frames - alloc.used_frames
+        alloc.total_frames.saturating_sub(alloc.used_frames)
+    }
+
+    /// Get (total_frames, used_frames, free_frames).
+    pub fn stats() -> (usize, usize, usize) {
+        let alloc = FRAME_ALLOC.lock();
+        let free = alloc.total_frames.saturating_sub(alloc.used_frames);
+        (alloc.total_frames, alloc.used_frames, free)
     }
 }

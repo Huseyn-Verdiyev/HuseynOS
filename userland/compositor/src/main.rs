@@ -194,19 +194,16 @@ impl Compositor {
         self.prerender_background();
     }
 
-    /// Pre-compute the wallpaper gradient + taskbar into bg_cache.
-    /// Called once at init. The clock text is NOT part of this cache
-    /// since it changes every minute.
     fn prerender_background(&mut self) {
-        let h = self.height.saturating_sub(TASKBAR_HEIGHT);
+        let h = self.height;
         let w = self.width;
 
-        // Wallpaper gradient
+        // Modern macOS Monterey-ish dark gradient
         for y in 0..h {
             let t = y as i32 * 255 / h.max(1) as i32;
-            let r = (WALL_TOP_R as i32 + (WALL_BOT_R as i32 - WALL_TOP_R as i32) * t / 255).clamp(0, 255) as u32;
-            let g = (WALL_TOP_G as i32 + (WALL_BOT_G as i32 - WALL_TOP_G as i32) * t / 255).clamp(0, 255) as u32;
-            let b = (WALL_TOP_B as i32 + (WALL_BOT_B as i32 - WALL_TOP_B as i32) * t / 255).clamp(0, 255) as u32;
+            let r = (20 + (50 - 20) * t / 255).clamp(0, 255) as u32;
+            let g = (25 + (15 - 25) * t / 255).clamp(0, 255) as u32;
+            let b = (45 + (85 - 45) * t / 255).clamp(0, 255) as u32;
             let color = 0xFF000000 | (r << 16) | (g << 8) | b;
             let row_start = y * w;
             for x in 0..w {
@@ -214,29 +211,76 @@ impl Compositor {
             }
         }
 
-        // Taskbar gradient
-        let tb_y = self.height.saturating_sub(TASKBAR_HEIGHT);
-        for dy in 0..TASKBAR_HEIGHT {
-            let color = Self::lerp_color(COLOR_TASKBAR_TOP, 0xFF222240, dy as u32, TASKBAR_HEIGHT as u32);
-            let row_start = (tb_y + dy) * w;
-            for x in 0..w {
-                if tb_y + dy < self.height {
-                    self.bg_cache[row_start + x] = color;
+        // Floating macOS-style Dock
+        let dock_h = 40;
+        let dock_w = 400.min(w - 40);
+        let dock_y = h.saturating_sub(dock_h + 10);
+        let dock_x = (w - dock_w) / 2;
+
+        let radius = 10;
+        for dy in 0..dock_h {
+            let py = dock_y + dy;
+            if py >= h { continue; }
+            for dx in 0..dock_w {
+                let px = dock_x + dx;
+                if px >= w { continue; }
+                
+                // Rounded corners (approximate circle)
+                if dx < radius && dy < radius {
+                    if (radius - dx) * (radius - dx) + (radius - dy) * (radius - dy) > radius * radius { continue; }
                 }
+                if dx >= dock_w - radius && dy < radius {
+                    let cx = dock_w - radius;
+                    if (dx - cx) * (dx - cx) + (radius - dy) * (radius - dy) > radius * radius { continue; }
+                }
+                if dx < radius && dy >= dock_h - radius {
+                    let cy = dock_h - radius;
+                    if (radius - dx) * (radius - dx) + (dy - cy) * (dy - cy) > radius * radius { continue; }
+                }
+                if dx >= dock_w - radius && dy >= dock_h - radius {
+                    let cx = dock_w - radius;
+                    let cy = dock_h - radius;
+                    if (dx - cx) * (dx - cx) + (dy - cy) * (dy - cy) > radius * radius { continue; }
+                }
+
+                // Translucent-looking glassy background (since no alpha blending, just hardcode color mix)
+                // Let's mix it manually with the background
+                let bg = self.bg_cache[py * w + px];
+                let r_bg = (bg >> 16) & 0xFF;
+                let g_bg = (bg >> 8) & 0xFF;
+                let b_bg = bg & 0xFF;
+                
+                // White overlay with 20% opacity
+                let a = 50; 
+                let inv_a = 255 - a;
+                let r = (255 * a + r_bg * inv_a) / 255;
+                let g = (255 * a + g_bg * inv_a) / 255;
+                let b = (255 * a + b_bg * inv_a) / 255;
+                
+                self.bg_cache[py * w + px] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
 
-        // Taskbar top border accent
-        if tb_y < self.height {
-            let row_start = tb_y * w;
-            for x in 0..w {
-                self.bg_cache[row_start + x] = COLOR_TASKBAR_LINE;
+        // Add Apple-style top menu bar (glassy)
+        let menu_h = 24;
+        for py in 0..menu_h {
+            for px in 0..w {
+                let bg = self.bg_cache[py * w + px];
+                let r_bg = (bg >> 16) & 0xFF;
+                let g_bg = (bg >> 8) & 0xFF;
+                let b_bg = bg & 0xFF;
+                let a = 80; 
+                let inv_a = 255 - a;
+                let r = (20 * a + r_bg * inv_a) / 255;
+                let g = (20 * a + g_bg * inv_a) / 255;
+                let b = (30 * a + b_bg * inv_a) / 255;
+                self.bg_cache[py * w + px] = 0xFF000000 | (r << 16) | (g << 8) | b;
             }
         }
 
-        // "HuseynOS" label (static, rendered into bg_cache)
         let mut cache = core::mem::take(&mut self.bg_cache);
-        self.draw_text_into(&mut cache, 10, tb_y + 10, "HuseynOS", COLOR_CLOCK);
+        // Apple-style bold top-left text
+        self.draw_text_into(&mut cache, 20, 8, "HuseynOS", 0xFFFFFFFF);
         self.bg_cache = cache;
     }
 
@@ -314,9 +358,7 @@ impl Compositor {
     }
 
     fn draw_taskbar_dynamic(&mut self) {
-        let tb_y = self.height.saturating_sub(TASKBAR_HEIGHT);
-
-        // Only draw dynamic parts: Clock + Power button
+        // Draw Clock in the top-right menu bar
         let dt = libhuseyn::get_time();
         let mut clock_buf = [0u8; 5];
         clock_buf[0] = b'0' + (dt.hour / 10);
@@ -324,24 +366,23 @@ impl Compositor {
         clock_buf[2] = b':';
         clock_buf[3] = b'0' + (dt.minute / 10);
         clock_buf[4] = b'0' + (dt.minute % 10);
-        let clock_x = self.width - 100;
+        let clock_x = self.width - 60;
         if let Ok(clock_str) = core::str::from_utf8(&clock_buf) {
-            self.draw_text(clock_x, tb_y + 10, clock_str, COLOR_CLOCK);
+            self.draw_text(clock_x, 8, clock_str, 0xFFFFFFFF); // White text
         }
 
-        // Power button
-        let pw_x = self.width - 35;
-        let pw_y = tb_y + 6;
-        self.fill_rect(pw_x, pw_y, 24, 20, COLOR_POWER_BG);
-        self.draw_text(pw_x + 7, pw_y + 6, "X", COLOR_POWER_TEXT);
+        // Power button (Red circle in top menu next to Clock)
+        let pw_x = self.width - 25;
+        let pw_y = 6;
+        self.fill_rect(pw_x, pw_y, 12, 12, 0xFFCC3333); 
+        self.draw_text(pw_x + 3, pw_y + 2, "X", 0xFFFFFFFF);
     }
 
-    /// Returns true if (mx, my) is inside the taskbar power button
+    /// Returns true if (mx, my) is inside the power button
     fn hit_power_button(&self, mx: usize, my: usize) -> bool {
-        let tb_y = self.height.saturating_sub(TASKBAR_HEIGHT);
-        let pw_x = self.width - 35;
-        let pw_y = tb_y + 6;
-        mx >= pw_x && mx < pw_x + 24 && my >= pw_y && my < pw_y + 20
+        let pw_x = self.width - 25;
+        let pw_y = 6;
+        mx >= pw_x && mx < pw_x + 12 && my >= pw_y && my < pw_y + 12
     }
 
     fn draw_window_decorations(&mut self, win_idx: usize) {

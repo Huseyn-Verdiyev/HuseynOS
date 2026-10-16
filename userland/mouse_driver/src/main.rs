@@ -3,8 +3,8 @@
 
 use libhuseyn::ipc;
 
-const SCREEN_WIDTH: i32 = 1024;
-const SCREEN_HEIGHT: i32 = 768;
+const DEFAULT_WIDTH: i32 = 1024;
+const DEFAULT_HEIGHT: i32 = 768;
 
 /// PS/2 mouse sends 3-byte packets:
 ///   Byte 0: [YO|XO|YS|XS|1|MB|RB|LB]
@@ -16,16 +16,20 @@ struct MouseState {
     x: i32,          // absolute cursor X
     y: i32,          // absolute cursor Y
     buttons: u8,     // button state (bit 0=left, bit 1=right, bit 2=middle)
+    screen_w: i32,
+    screen_h: i32,
 }
 
 impl MouseState {
-    const fn new() -> Self {
+    fn new(w: i32, h: i32) -> Self {
         Self {
             phase: 0,
             packet: [0; 3],
-            x: SCREEN_WIDTH / 2,
-            y: SCREEN_HEIGHT / 2,
+            x: w / 2,
+            y: h / 2,
             buttons: 0,
+            screen_w: w,
+            screen_h: h,
         }
     }
 
@@ -83,14 +87,15 @@ impl MouseState {
             return; // X or Y overflow, discard
         }
 
-        self.x = (self.x + dx).clamp(0, SCREEN_WIDTH - 1);
-        self.y = (self.y + dy).clamp(0, SCREEN_HEIGHT - 1);
+        self.x = (self.x + dx).clamp(0, self.screen_w - 1);
+        self.y = (self.y + dy).clamp(0, self.screen_h - 1);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let mut state = MouseState::new();
+    let (_, w, h, _, _) = libhuseyn::get_fb_info();
+    let mut state = MouseState::new(w as i32, h as i32);
     let mut prev_buttons: u8 = 0;
 
     loop {

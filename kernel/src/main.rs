@@ -10,6 +10,7 @@ mod ipc;
 mod memory;
 mod pic;
 mod pit;
+mod pci;
 mod process;
 mod rtc;
 mod elf;
@@ -81,6 +82,9 @@ unsafe extern "C" fn kmain() -> ! {
         println!("[FATAL] Limine base revision NOT supported!");
         hcf();
     }
+
+    // Cihazları Axtar (Səmimi quraşdırıcı üçün ilk addım)
+    pci::enumerate_pci();
 
     // 2. GDT
     gdt::init();

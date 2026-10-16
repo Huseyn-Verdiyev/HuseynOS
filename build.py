@@ -80,8 +80,8 @@ def step_build_kernel():
     
     # We delegate to the PowerShell script because it sets up the correct RUSTFLAGS
     # for each userland crate to avoid linker errors.
-    print("  Delegating build to run_tests.ps1...")
-    run_cmd(["powershell", "-ExecutionPolicy", "Bypass", "-File", "run_tests.ps1", "-SkipISO"], cwd=PROJECT_ROOT)
+    print("  Delegating build to run_tests.sh...")
+    run_cmd(["sh", "run_tests.sh"], cwd=PROJECT_ROOT)
     
     if not KERNEL_BINARY.exists():
         print(f"  ERROR: Kernel binary not found at {KERNEL_BINARY}")
@@ -237,13 +237,13 @@ def step_create_iso():
     if not limine_exe.exists():
         limine_exe = LIMINE_DIR / "limine"
     
-    if limine_exe.exists():
+    if False:
         print("  Installing Limine BIOS boot sector...")
         run_cmd([str(limine_exe), "bios-install", str(OUTPUT_ISO)])
         print("  OK: BIOS boot sector installed.")
     else:
-        print("  WARNING: limine executable not found — BIOS boot may not work.")
-        print("    UEFI boot should still work in VirtualBox (enable EFI in VM settings).")
+        print("  WARNING: Skipping limine bios-install on Mac — BIOS boot may not work.")
+        print("    UEFI boot should still work in QEMU/VirtualBox.")
 
 
 # ─── Step 4: Run in QEMU ─────────────────────────────────────────────────────
@@ -261,6 +261,7 @@ def step_run_qemu():
     
     run_cmd([
         qemu, "-cdrom", str(OUTPUT_ISO),
+        "-drive", "if=pflash,format=raw,readonly=on,file=/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
         "-serial", "file:qemu_out.txt",
         "-m", "128M",
         "-no-reboot",

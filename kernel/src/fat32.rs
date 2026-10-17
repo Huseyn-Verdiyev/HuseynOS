@@ -311,7 +311,7 @@ pub fn delete_file(filename: &str) -> bool {
     {
         let mut deleted = DELETED_FILES.lock();
         if !deleted.iter().any(|d| *d == key) {
-            deleted.push(key);
+            deleted.push(key.clone());
         }
     }
 

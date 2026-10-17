@@ -129,6 +129,18 @@ unsafe fn parse_madt(madt_virt: u64) {
     }
 }
 
+fn ensure_mapped(phys: u64, size: usize) -> u64 {
+    let start_page = phys & !0xFFF;
+    let end_page = (phys + size as u64 + 0xFFF) & !0xFFF;
+    for page in (start_page..end_page).step_by(0x1000) {
+        let virt = phys_to_virt(page);
+        if crate::memory::paging::get_mapped_frame(crate::memory::paging::get_pml4(), virt).is_none() {
+            crate::memory::paging::map_page(virt, page, crate::memory::paging::WRITABLE);
+        }
+    }
+    phys_to_virt(phys)
+}
+
 pub fn init() {
     let resp = match RSDP_REQUEST.get_response() {
         Some(r) => r,
@@ -139,11 +151,13 @@ pub fn init() {
     };
 
     let rsdp_addr = resp.address() as u64;
+    crate::serial_println!("[ACPI] RSDP raw address: {:#X}", rsdp_addr);
     let rsdp_virt = if rsdp_addr < 0xFFFF_8000_0000_0000 {
-        phys_to_virt(rsdp_addr)
+        ensure_mapped(rsdp_addr, core::mem::size_of::<RsdpDescriptor>())
     } else {
         rsdp_addr
     };
+    crate::serial_println!("[ACPI] RSDP virt address: {:#X}", rsdp_virt);
 
     unsafe {
         let rsdp = &*(rsdp_virt as *const RsdpDescriptor);
@@ -151,33 +165,45 @@ pub fn init() {
             println!("[ACPI] Invalid RSDP signature");
             return;
         }
-
         let rev = rsdp.revision;
+        crate::serial_println!("[ACPI] Signature OK! Rev: {}", rev);
         ACPI_INFO.lock().rsdp_revision = rev;
 
         if rev >= 2 && { rsdp.xsdt_address } != 0 {
-            let xsdt_virt = phys_to_virt({ rsdp.xsdt_address });
+            let xsdt_phys = { rsdp.xsdt_address };
+            let xsdt_virt = ensure_mapped(xsdt_phys, 4096);
             let hdr = &*(xsdt_virt as *const AcpiSdtHeader);
-            let entries = (({ hdr.length } as usize).saturating_sub(core::mem::size_of::<AcpiSdtHeader>())) / 8;
+            let total_len = { hdr.length } as usize;
+            let xsdt_virt = ensure_mapped(xsdt_phys, total_len);
+            let entries = total_len.saturating_sub(core::mem::size_of::<AcpiSdtHeader>()) / 8;
             let table_ptrs = (xsdt_virt + core::mem::size_of::<AcpiSdtHeader>() as u64) as *const u64;
 
             for i in 0..entries {
                 let sdt_phys = table_ptrs.add(i).read_unaligned();
-                let sdt_virt = phys_to_virt(sdt_phys);
+                let sdt_virt = ensure_mapped(sdt_phys, 4096);
+                let sdt_hdr = &*(sdt_virt as *const AcpiSdtHeader);
+                let table_len = { sdt_hdr.length } as usize;
+                let sdt_virt = ensure_mapped(sdt_phys, table_len);
                 let sdt_hdr = &*(sdt_virt as *const AcpiSdtHeader);
                 if &sdt_hdr.signature == b"APIC" {
                     parse_madt(sdt_virt);
                 }
             }
         } else if { rsdp.rsdt_address } != 0 {
-            let rsdt_virt = phys_to_virt({ rsdp.rsdt_address } as u64);
+            let rsdt_phys = { rsdp.rsdt_address } as u64;
+            let rsdt_virt = ensure_mapped(rsdt_phys, 4096);
             let hdr = &*(rsdt_virt as *const AcpiSdtHeader);
-            let entries = (({ hdr.length } as usize).saturating_sub(core::mem::size_of::<AcpiSdtHeader>())) / 4;
+            let total_len = { hdr.length } as usize;
+            let rsdt_virt = ensure_mapped(rsdt_phys, total_len);
+            let entries = total_len.saturating_sub(core::mem::size_of::<AcpiSdtHeader>()) / 4;
             let table_ptrs = (rsdt_virt + core::mem::size_of::<AcpiSdtHeader>() as u64) as *const u32;
 
             for i in 0..entries {
                 let sdt_phys = table_ptrs.add(i).read_unaligned() as u64;
-                let sdt_virt = phys_to_virt(sdt_phys);
+                let sdt_virt = ensure_mapped(sdt_phys, 4096);
+                let sdt_hdr = &*(sdt_virt as *const AcpiSdtHeader);
+                let table_len = { sdt_hdr.length } as usize;
+                let sdt_virt = ensure_mapped(sdt_phys, table_len);
                 let sdt_hdr = &*(sdt_virt as *const AcpiSdtHeader);
                 if &sdt_hdr.signature == b"APIC" {
                     parse_madt(sdt_virt);

@@ -266,7 +266,7 @@ extern "C" fn interrupt_handler(context_ptr: *mut InterruptContext) -> *mut Inte
                 }
             } else {
                 // Kernel page fault — unrecoverable
-                serial_println!("[EXCEPTION] Kernel Page fault @ {:#X}, error={:#X}", cr2, error_code);
+                serial_println!("[EXCEPTION] Kernel Page fault @ {:#X}, rip={:#X}, error={:#X}", cr2, ctx.rip, error_code);
                 loop { unsafe { asm!("hlt"); } }
             }
         }

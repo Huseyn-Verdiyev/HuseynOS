@@ -92,8 +92,22 @@ impl FrameAllocator {
         let mut free_count = 0usize;
 
         for entry in memory_map.entries() {
+            let t_name = if entry.entry_type == EntryType::USABLE {
+                "USABLE"
+            } else if entry.entry_type == EntryType::RESERVED {
+                "RESERVED"
+            } else if entry.entry_type == EntryType::ACPI_RECLAIMABLE {
+                "ACPI_RECLAIMABLE"
+            } else if entry.entry_type == EntryType::ACPI_NVS {
+                "ACPI_NVS"
+            } else if entry.entry_type == EntryType::BOOTLOADER_RECLAIMABLE {
+                "BOOTLOADER_RECLAIMABLE"
+            } else {
+                "OTHER"
+            };
+            serial_println!("  [mmap] base={:#X}, len={:#X}, type={}", entry.base, entry.length, t_name);
             if entry.entry_type == EntryType::USABLE {
-                let start_frame = (entry.base as usize + PAGE_SIZE - 1) / PAGE_SIZE;
+                let start_frame = ((entry.base as usize + PAGE_SIZE - 1) / PAGE_SIZE).max(256);
                 let end_frame = ((entry.base + entry.length) as usize) / PAGE_SIZE;
 
                 for frame in start_frame..end_frame {

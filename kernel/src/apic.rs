@@ -1,5 +1,6 @@
 //! Local APIC & I/O APIC Hardware Controller Driver.
-//! Maps the Local APIC and IOAPIC MMIO pages with CACHE_DISABLE and initializes the Local APIC SVR.
+//! Maps Local APIC and IOAPIC MMIO pages with CACHE_DISABLE, initializes Local APIC SVR,
+//! and writes IOAPIC Redirection Table entries (routing hardware interrupts to CPU vectors).
 
 use alloc::string::String;
 use core::fmt::Write;
@@ -27,7 +28,31 @@ static APIC_STATE: Mutex<ApicState> = Mutex::new(ApicState {
     active: false,
 });
 
-/// Initialize Local APIC and probe IOAPIC redirection table capacity without breaking active timer IRQs.
+/// Write a 64-bit redirection entry in the I/O APIC Redirection Table.
+pub fn write_ioapic_redirection(gsi: u32, vector: u8, dest_apic_id: u8, mask: bool) {
+    let ioapic_phys = APIC_STATE.lock().ioapic_phys;
+    let io_virt = phys_to_virt(ioapic_phys);
+    let ioregsel = io_virt as *mut u32;
+    let iowin = (io_virt + 0x10) as *mut u32;
+
+    let reg_low = 0x10 + (gsi * 2);
+    let reg_high = reg_low + 1;
+
+    // Delivery Mode: Fixed (000), Dest Mode: Physical (0), Polarity: High (0), Trigger: Edge (0)
+    let mut low_val = vector as u32;
+    if mask {
+        low_val |= 1 << 16; // Masked
+    }
+    let high_val = (dest_apic_id as u32) << 24;
+
+    unsafe {
+        ioregsel.write_volatile(reg_low);
+        iowin.write_volatile(low_val);
+        ioregsel.write_volatile(reg_high);
+        iowin.write_volatile(high_val);
+    }
+}
+
 pub fn init() {
     let (lapic_phys, ioapic_opt, cores) = crate::acpi::get_lapic_And_ioapic();
     let lapic_virt = phys_to_virt(lapic_phys);
@@ -71,7 +96,7 @@ pub fn init() {
         st.active = true;
 
         println!(
-            "[OK] Local APIC #{} (v{:#x}) enabled; IOAPIC @ {:#X} ({} IRQ lines)",
+            "[OK] Local APIC #{} (v{:#x}) enabled; IOAPIC @ {:#X} ({} IRQ pins)",
             lapic_id,
             lapic_ver,
             io_phys,
@@ -86,7 +111,7 @@ pub fn format_status() -> String {
     let _ = writeln!(
         s,
         "APIC Status  : {} (BSP LAPIC ID {}, v{:#x}, {} IRQ pins)",
-        if st.active { "ONLINE" } else { "LEGACY-PIC" },
+        if st.active { "ONLINE (Redirection Ready)" } else { "LEGACY-PIC" },
         st.lapic_id,
         st.lapic_ver,
         st.ioapic_max_redir + 1

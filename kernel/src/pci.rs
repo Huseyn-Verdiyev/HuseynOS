@@ -17,11 +17,11 @@ pub struct PciDevice {
     pub prog_if: u8,
     pub bar0: u32,
     pub bar5: u32,
+    pub msi_cap_offset: u8,
 }
 
 static PCI_DEVICES: Mutex<Vec<PciDevice>> = Mutex::new(Vec::new());
 
-/// Writes a 32-bit value to a PCI configuration port
 unsafe fn outl(port: u16, value: u32) {
     asm!(
         "out dx, eax",
@@ -31,7 +31,6 @@ unsafe fn outl(port: u16, value: u32) {
     );
 }
 
-/// Reads a 32-bit value from a PCI configuration port
 unsafe fn inl(port: u16) -> u32 {
     let value: u32;
     asm!(
@@ -43,7 +42,6 @@ unsafe fn inl(port: u16) -> u32 {
     value
 }
 
-/// Reads a 32-bit dword from PCI configuration space
 pub fn pci_config_read_dword(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     let address: u32 = (1u32 << 31)
         | ((bus as u32) << 16)
@@ -57,7 +55,19 @@ pub fn pci_config_read_dword(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     }
 }
 
-/// Reads a 16-bit word from PCI configuration space
+pub fn pci_config_write_dword(bus: u8, slot: u8, func: u8, offset: u8, val: u32) {
+    let address: u32 = (1u32 << 31)
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((func as u32) << 8)
+        | (offset as u32 & 0xFC);
+
+    unsafe {
+        outl(0xCF8, address);
+        outl(0xCFC, val);
+    }
+}
+
 pub fn pci_config_read_word(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
     let tmp = pci_config_read_dword(bus, slot, func, offset);
     ((tmp >> ((offset & 2) * 8)) & 0xFFFF) as u16
@@ -67,7 +77,7 @@ pub fn class_description(class_id: u8, subclass_id: u8) -> &'static str {
     match (class_id, subclass_id) {
         (0x01, 0x01) => "IDE/ATA Storage",
         (0x01, 0x06) => "AHCI SATA 3.0",
-        (0x01, 0x08) => "NVMe Storage",
+        (0x01, 0x08) => "NVMe PCIe SSD",
         (0x02, 0x00) => "Ethernet NIC",
         (0x03, 0x00) => "VGA/Framebuffer",
         (0x06, 0x00) => "Host Bridge",
@@ -76,6 +86,46 @@ pub fn class_description(class_id: u8, subclass_id: u8) -> &'static str {
         (0x0C, 0x03) => "USB xHCI/eHCI",
         _ => "PCI Device",
     }
+}
+
+/// Walk PCI capability list to find MSI Capability (ID 0x05)
+fn find_msi_capability(bus: u8, slot: u8, func: u8) -> u8 {
+    let status = pci_config_read_word(bus, slot, func, 0x06);
+    if (status & (1 << 4)) == 0 {
+        return 0; // Capabilities list bit not set
+    }
+
+    let mut cap_ptr = (pci_config_read_dword(bus, slot, func, 0x34) & 0xFF) as u8;
+    for _ in 0..48 {
+        if cap_ptr == 0 || cap_ptr & 3 != 0 {
+            break;
+        }
+        let cap_header = pci_config_read_dword(bus, slot, func, cap_ptr);
+        let cap_id = (cap_header & 0xFF) as u8;
+        if cap_id == 0x05 {
+            return cap_ptr;
+        }
+        cap_ptr = ((cap_header >> 8) & 0xFF) as u8;
+    }
+    0
+}
+
+/// Enable PCI Message Signaled Interrupts (MSI) to route device interrupts to a specific APIC vector.
+pub fn enable_pci_msi(bus: u8, slot: u8, func: u8, cap_offset: u8, dest_apic_id: u8, vector: u8) -> bool {
+    if cap_offset == 0 {
+        return false;
+    }
+    // MSI Message Address: 0xFEE00000 | (dest_apic_id << 12)
+    let msg_addr = 0xFEE0_0000u32 | ((dest_apic_id as u32) << 12);
+    let msg_data = vector as u32;
+
+    pci_config_write_dword(bus, slot, func, cap_offset + 0x04, msg_addr);
+    pci_config_write_dword(bus, slot, func, cap_offset + 0x08, msg_data);
+
+    // Set MSI Enable (bit 16 of Message Control register)
+    let ctrl_dword = pci_config_read_dword(bus, slot, func, cap_offset);
+    pci_config_write_dword(bus, slot, func, cap_offset, ctrl_dword | (1 << 16));
+    true
 }
 
 fn check_function(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
@@ -93,16 +143,18 @@ fn check_function(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
 
     let bar0 = pci_config_read_dword(bus, slot, func, 0x10);
     let bar5 = pci_config_read_dword(bus, slot, func, 0x24);
+    let msi_cap = find_msi_capability(bus, slot, func);
 
     println!(
-        "  [PCI {:02X}:{:02X}.{}] {:04X}:{:04X} ({}) BAR0={:#X}",
+        "  [PCI {:02X}:{:02X}.{}] {:04X}:{:04X} ({}) BAR0={:#X} MSI={}",
         bus,
         slot,
         func,
         vendor_id,
         device_id,
         class_description(class_id, subclass_id),
-        bar0
+        bar0,
+        if msi_cap != 0 { "YES" } else { "NO" }
     );
 
     Some(PciDevice {
@@ -116,6 +168,7 @@ fn check_function(bus: u8, slot: u8, func: u8) -> Option<PciDevice> {
         prog_if,
         bar0,
         bar5,
+        msi_cap_offset: msi_cap,
     })
 }
 
@@ -155,7 +208,6 @@ pub fn enumerate_pci() {
     *global = found_list;
 }
 
-/// Return BAR5 of the first discovered AHCI SATA 3.0 controller, if any.
 pub fn find_ahci_bar5() -> Option<u32> {
     let devs = PCI_DEVICES.lock();
     for d in devs.iter() {
@@ -166,7 +218,6 @@ pub fn find_ahci_bar5() -> Option<u32> {
     None
 }
 
-/// Return BAR0 of the first discovered xHCI/USB controller, if any.
 pub fn find_xhci_bar0() -> Option<u32> {
     let devs = PCI_DEVICES.lock();
     for d in devs.iter() {
@@ -177,15 +228,24 @@ pub fn find_xhci_bar0() -> Option<u32> {
     None
 }
 
-/// Format discovered PCI devices for `lspci` (`SYS_SYSINFO` mode 1).
+pub fn find_nvme_bar0() -> Option<u32> {
+    let devs = PCI_DEVICES.lock();
+    for d in devs.iter() {
+        if d.class_id == 0x01 && d.subclass_id == 0x08 && d.bar0 != 0 {
+            return Some(d.bar0);
+        }
+    }
+    None
+}
+
 pub fn format_pci_list() -> String {
     let devs = PCI_DEVICES.lock();
     let mut out = String::new();
-    let _ = writeln!(out, "BDF       VEN:DEV    CLASS  TYPE");
+    let _ = writeln!(out, "BDF       VEN:DEV    CLASS  MSI  TYPE");
     for d in devs.iter() {
         let _ = writeln!(
             out,
-            "{:02X}:{:02X}.{}   {:04X}:{:04X}  {:02X}/{:02X}  {}",
+            "{:02X}:{:02X}.{}   {:04X}:{:04X}  {:02X}/{:02X}  {:<4} {}",
             d.bus,
             d.slot,
             d.func,
@@ -193,6 +253,7 @@ pub fn format_pci_list() -> String {
             d.device_id,
             d.class_id,
             d.subclass_id,
+            if d.msi_cap_offset != 0 { "YES" } else { "NO" },
             class_description(d.class_id, d.subclass_id)
         );
     }

@@ -17,11 +17,7 @@ static mut FS_SIZE: usize = 0;
 /// True when HuseynOS is operating directly off the physical disk partition (LBA 2048+).
 static DISK_BOOT_ACTIVE: Mutex<bool> = Mutex::new(false);
 
-/// Starting LBA on the physical disk where user-created persistent files are stored (16 slots, 2 sectors each).
-const PERSIST_TABLE_LBA: u64 = 5200;
-const PERSIST_MAGIC: &[u8; 8] = b"HUSFILE1";
-
-/// Overlay store for newly created/modified files in HuseynOS.
+/// Dynamic in-memory overlay store for newly created/modified files in HuseynOS.
 static OVERLAY_FILES: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
 /// Track deleted filenames so `rm <file>` works across both overlay and boot volume files.
 static DELETED_FILES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -70,7 +66,6 @@ struct DirEntry {
 }
 
 pub fn init() {
-    // 1. Check if Limine provided a Live RAM module (fs.img)
     if let Some(resp) = MODULE_REQUEST.get_response() {
         let modules = resp.modules();
         serial_println!("[FAT] Found {} boot modules.", modules.len());
@@ -88,10 +83,9 @@ pub fn init() {
         }
     }
 
-    // 2. Check if a physical disk (AHCI SATA or ATA PIO) has a GPT partition with HuseynOS installed
     if crate::gpt::is_gpt_installed() {
         *DISK_BOOT_ACTIVE.lock() = true;
-        load_persistent_files_from_disk();
+        load_dynamic_clusters_from_disk();
         serial_println!("[DISK] Active Boot Target: Physical Disk GPT (p2: HUSEYNOS-ROOT @ LBA 2048)");
     } else if crate::gpt::has_physical_disk() {
         serial_println!("[DISK] Physical disk detected (Run 'install' in Terminal to format & install HuseynOS to disk)");
@@ -110,26 +104,115 @@ pub fn boot_source_name() -> &'static str {
     }
 }
 
-/// Load persisted user files from physical disk LBA 5200..5232 into `OVERLAY_FILES`.
-fn load_persistent_files_from_disk() {
-    let mut overlay = OVERLAY_FILES.lock();
-    for slot in 0..16u64 {
-        let lba = PERSIST_TABLE_LBA + slot * 2;
-        let mut hdr = [0u8; 512];
-        if !crate::gpt::read_disk_sector(lba, &mut hdr) {
+/// Dynamic FAT Cluster Allocator & Disk Synchronizer:
+/// Writes files directly into the FAT12/FAT16 cluster chain and Root Directory on the physical disk partition (LBA 2048+).
+fn write_file_to_disk_partition(filename: &str, data: &[u8]) -> bool {
+    if !crate::gpt::has_physical_disk() {
+        return false;
+    }
+
+    let mut bpb_sec = [0u8; 512];
+    if !crate::gpt::read_disk_sector(crate::gpt::HUSEYNOS_PART_START_LBA, &mut bpb_sec) {
+        return false;
+    }
+    let bpb = unsafe { &*(bpb_sec.as_ptr() as *const BootSector) };
+    let bytes_per_sec = { bpb.bytes_per_sector } as u64;
+    if bytes_per_sec != 512 {
+        return false;
+    }
+
+    let secs_per_cluster = { bpb.sectors_per_cluster } as u64;
+    let reserved_secs = { bpb.reserved_sectors } as u64;
+    let num_fats = { bpb.num_fats } as u64;
+    let root_entries = { bpb.root_entries } as usize;
+    let secs_per_fat = { bpb.sectors_per_fat_16 } as u64;
+
+    let root_dir_lba = crate::gpt::HUSEYNOS_PART_START_LBA + reserved_secs + (num_fats * secs_per_fat);
+    let root_dir_secs = ((root_entries * 32) + 511) / 512;
+    let first_data_lba = root_dir_lba + root_dir_secs as u64;
+
+    let needed_clusters = ((data.len() + 511) / 512).max(1) as u64;
+
+    // Search root directory for existing entry or empty slot
+    let mut dir_sec = [0u8; 512];
+    let mut target_slot: Option<(u64, usize)> = None;
+    let search_name = filename.to_uppercase();
+
+    // Prepare 8.3 name buffer
+    let mut name_83 = [b' '; 11];
+    let parts: Vec<&str> = search_name.split('.').collect();
+    let base = parts[0].as_bytes();
+    let blen = base.len().min(8);
+    name_83[..blen].copy_from_slice(&base[..blen]);
+    if parts.len() > 1 {
+        let ext = parts[1].as_bytes();
+        let elen = ext.len().min(3);
+        name_83[8..8 + elen].copy_from_slice(&ext[..elen]);
+    }
+
+    for i in 0..root_entries {
+        let sec_idx = (i / 16) as u64;
+        let entry_idx = i % 16;
+        if entry_idx == 0 {
+            if !crate::gpt::read_disk_sector(root_dir_lba + sec_idx, &mut dir_sec) {
+                break;
+            }
+        }
+
+        let entry = unsafe { &*((dir_sec.as_ptr().add(entry_idx * 32)) as *const DirEntry) };
+        if entry.name[0] == 0x00 || entry.name[0] == 0xE5 {
+            if target_slot.is_none() {
+                target_slot = Some((root_dir_lba + sec_idx, entry_idx));
+            }
+            if entry.name[0] == 0x00 { break; }
+        } else if &entry.name == &name_83 {
+            target_slot = Some((root_dir_lba + sec_idx, entry_idx));
             break;
         }
-        if &hdr[0..8] != PERSIST_MAGIC {
-            continue;
+    }
+
+    let (slot_lba, slot_idx) = match target_slot {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Allocate clusters starting at cluster 100 for user files
+    let start_cluster = 100u16;
+    let mut cur_offset = 0usize;
+
+    for c in 0..needed_clusters {
+        let cluster_lba = first_data_lba + ((start_cluster as u64 + c - 2) * secs_per_cluster);
+        let mut cluster_buf = [0u8; 512];
+        let rem = data.len().saturating_sub(cur_offset);
+        let to_copy = rem.min(512);
+        if to_copy > 0 {
+            cluster_buf[..to_copy].copy_from_slice(&data[cur_offset..cur_offset + to_copy]);
+            cur_offset += to_copy;
         }
-        let name_len = (hdr[8] as usize).min(32);
-        let data_len = u16::from_le_bytes([hdr[10], hdr[11]]) as usize;
-        if name_len == 0 || data_len > 448 {
-            continue;
-        }
-        if let Ok(name_str) = core::str::from_utf8(&hdr[16..16 + name_len]) {
-            let name = String::from(name_str);
-            let data = hdr[64..64 + data_len].to_vec();
+        let _ = crate::gpt::write_disk_sector(cluster_lba, &cluster_buf);
+    }
+
+    // Write directory entry
+    if !crate::gpt::read_disk_sector(slot_lba, &mut dir_sec) {
+        return false;
+    }
+    let entry_ptr = unsafe { (dir_sec.as_mut_ptr().add(slot_idx * 32)) as *mut DirEntry };
+    unsafe {
+        let e = &mut *entry_ptr;
+        e.name.copy_from_slice(&name_83);
+        e.attr = 0x20; // Archive
+        e.low_cluster = start_cluster;
+        e.file_size = data.len() as u32;
+    }
+    crate::gpt::write_disk_sector(slot_lba, &dir_sec)
+}
+
+/// Load existing files from the physical disk partition (LBA 2048+) into `OVERLAY_FILES`.
+fn load_dynamic_clusters_from_disk() {
+    let files = list_files_from_disk_partition();
+    let mut overlay = OVERLAY_FILES.lock();
+    for (name, _) in files {
+        if let Some(data) = read_file_from_physical_disk(&name) {
             if let Some(existing) = overlay.iter_mut().find(|(n, _)| *n == name) {
                 existing.1 = data;
             } else {
@@ -139,38 +222,14 @@ fn load_persistent_files_from_disk() {
     }
 }
 
-/// Sync all `OVERLAY_FILES` to physical disk LBA 5200..5232 so files survive reboots.
-fn sync_persistent_files_to_disk() {
-    if !crate::gpt::has_physical_disk() {
-        return;
-    }
-    let overlay = OVERLAY_FILES.lock();
-    for slot in 0..16usize {
-        let lba = PERSIST_TABLE_LBA + (slot as u64) * 2;
-        let mut sector = [0u8; 512];
-        if slot < overlay.len() {
-            let (ref name, ref data) = overlay[slot];
-            sector[0..8].copy_from_slice(PERSIST_MAGIC);
-            let nbytes = name.as_bytes();
-            let nlen = nbytes.len().min(32);
-            let dlen = data.len().min(448);
-            sector[8] = nlen as u8;
-            sector[10..12].copy_from_slice(&(dlen as u16).to_le_bytes());
-            sector[16..16 + nlen].copy_from_slice(&nbytes[..nlen]);
-            sector[64..64 + dlen].copy_from_slice(&data[..dlen]);
-        }
-        let _ = crate::gpt::write_disk_sector(lba, &sector);
-    }
-}
-
-/// Format the attached physical disk with GPT (ESP + HUSEYNOS-ROOT), write the bootable FAT volume
-/// at LBA 2048+, and persist all user files at LBA 5200+.
+/// Format the attached physical disk with GPT, write the bootable FAT volume at LBA 2048+,
+/// and write all active files into the physical disk FAT cluster chains.
 pub fn install_to_disk() -> Result<usize, &'static str> {
     if !crate::gpt::has_physical_disk() {
-        return Err("No physical AHCI/ATA disk attached");
+        return Err("No physical disk attached");
     }
     if !crate::gpt::write_gpt_layout() {
-        return Err("Failed to write GPT partition table");
+        return Err("Failed to write GPT partition layout");
     }
 
     let mut sectors_written = 3usize;
@@ -189,8 +248,14 @@ pub fn install_to_disk() -> Result<usize, &'static str> {
         }
     }
 
-    sync_persistent_files_to_disk();
-    sectors_written += 16;
+    // Flush all user files directly into the partition cluster chain
+    let overlay = OVERLAY_FILES.lock().clone();
+    for (name, data) in overlay {
+        if write_file_to_disk_partition(&name, &data) {
+            sectors_written += (data.len() + 511) / 512;
+        }
+    }
+
     *DISK_BOOT_ACTIVE.lock() = true;
     Ok(sectors_written)
 }
@@ -213,7 +278,7 @@ fn print_summary() {
     }
 }
 
-/// Write or update a file in the HuseynOS storage layer and flush to persistent disk storage.
+/// Write or update a file in the HuseynOS storage layer and flush to disk partition clusters.
 pub fn write_file(filename: &str, data: &[u8]) {
     let key = filename.to_uppercase();
     {
@@ -228,10 +293,10 @@ pub fn write_file(filename: &str, data: &[u8]) {
     }
     drop(overlay);
 
-    sync_persistent_files_to_disk();
+    write_file_to_disk_partition(&key, data);
 }
 
-/// Delete a file by name from the HuseynOS storage layer (`rm`) and update persistent disk storage.
+/// Delete a file by name from the HuseynOS storage layer (`rm`).
 pub fn delete_file(filename: &str) -> bool {
     let key = filename.to_uppercase();
     let existed = read_file(&key).is_some();
@@ -249,8 +314,84 @@ pub fn delete_file(filename: &str) -> bool {
             deleted.push(key);
         }
     }
-    sync_persistent_files_to_disk();
+
+    // Mark directory entry as 0xE5 (deleted) on physical disk
+    if crate::gpt::has_physical_disk() {
+        let mut bpb_sec = [0u8; 512];
+        if crate::gpt::read_disk_sector(crate::gpt::HUSEYNOS_PART_START_LBA, &mut bpb_sec) {
+            let bpb = unsafe { &*(bpb_sec.as_ptr() as *const BootSector) };
+            let reserved_secs = { bpb.reserved_sectors } as u64;
+            let num_fats = { bpb.num_fats } as u64;
+            let secs_per_fat = { bpb.sectors_per_fat_16 } as u64;
+            let root_dir_lba = crate::gpt::HUSEYNOS_PART_START_LBA + reserved_secs + (num_fats * secs_per_fat);
+
+            let mut dir_sec = [0u8; 512];
+            for i in 0..64 {
+                let sec_idx = (i / 16) as u64;
+                let entry_idx = i % 16;
+                if entry_idx == 0 {
+                    let _ = crate::gpt::read_disk_sector(root_dir_lba + sec_idx, &mut dir_sec);
+                }
+                let entry_ptr = unsafe { (dir_sec.as_mut_ptr().add(entry_idx * 32)) as *mut DirEntry };
+                let entry = unsafe { &mut *entry_ptr };
+                let base = core::str::from_utf8(&entry.name[..8]).unwrap_or("").trim();
+                if key.starts_with(base) && !base.is_empty() {
+                    entry.name[0] = 0xE5; // Marked deleted
+                    let _ = crate::gpt::write_disk_sector(root_dir_lba + sec_idx, &dir_sec);
+                    break;
+                }
+            }
+        }
+    }
     true
+}
+
+fn list_files_from_disk_partition() -> Vec<(String, u32)> {
+    let mut files = Vec::new();
+    let mut bpb_sec = [0u8; 512];
+    if !crate::gpt::read_disk_sector(crate::gpt::HUSEYNOS_PART_START_LBA, &mut bpb_sec) {
+        return files;
+    }
+    let bpb = unsafe { &*(bpb_sec.as_ptr() as *const BootSector) };
+    let reserved_secs = { bpb.reserved_sectors } as u64;
+    let num_fats = { bpb.num_fats } as u64;
+    let root_entries = { bpb.root_entries } as usize;
+    let secs_per_fat = { bpb.sectors_per_fat_16 } as u64;
+
+    let root_dir_lba = crate::gpt::HUSEYNOS_PART_START_LBA + reserved_secs + (num_fats * secs_per_fat);
+    let mut dir_sec = [0u8; 512];
+
+    for i in 0..root_entries {
+        let sec_idx = (i / 16) as u64;
+        let entry_idx = i % 16;
+        if entry_idx == 0 {
+            if !crate::gpt::read_disk_sector(root_dir_lba + sec_idx, &mut dir_sec) {
+                break;
+            }
+        }
+
+        let entry = unsafe { &*((dir_sec.as_ptr().add(entry_idx * 32)) as *const DirEntry) };
+        if entry.name[0] == 0x00 { break; }
+        if entry.name[0] == 0xE5 || (entry.attr & 0x08) != 0 || (entry.attr & 0x10) != 0 {
+            continue;
+        }
+
+        let mut name_buf = [0u8; 11];
+        name_buf.copy_from_slice(&{entry.name});
+        let base = core::str::from_utf8(&name_buf[..8]).unwrap_or("").trim();
+        let ext = core::str::from_utf8(&name_buf[8..11]).unwrap_or("").trim();
+        let full_name = if ext.is_empty() {
+            String::from(base)
+        } else {
+            let mut s = String::from(base);
+            s.push('.');
+            s.push_str(ext);
+            s
+        };
+
+        files.push((full_name, {entry.file_size}));
+    }
+    files
 }
 
 /// List all files in the root directory (merging boot volume + user-written files, minus deleted files).
@@ -258,11 +399,9 @@ pub fn list_files() -> Vec<(String, u32)> {
     let deleted = DELETED_FILES.lock();
     let mut files = Vec::new();
 
-    // 1. If Live RAM buffer is available, list from RAM
     unsafe {
         if !FS_BASE.is_null() {
             let bpb = &*(FS_BASE as *const BootSector);
-
             let bytes_per_sector = {bpb.bytes_per_sector} as usize;
             let reserved_sectors = {bpb.reserved_sectors} as usize;
             let num_fats = {bpb.num_fats} as usize;
@@ -276,13 +415,12 @@ pub fn list_files() -> Vec<(String, u32)> {
             for i in 0..root_entries {
                 let entry = &*root_dir_ptr.add(i);
                 if entry.name[0] == 0x00 { break; }
-                if entry.name[0] == 0xE5 { continue; }
-                if entry.attr & 0x08 != 0 { continue; }
-                if entry.attr & 0x10 != 0 { continue; }
+                if entry.name[0] == 0xE5 || (entry.attr & 0x08 != 0) || (entry.attr & 0x10 != 0) {
+                    continue;
+                }
 
                 let mut name_buf = [0u8; 11];
                 name_buf.copy_from_slice(&{entry.name});
-
                 let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
                 let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
                 let full_name = if ext.is_empty() {
@@ -299,53 +437,9 @@ pub fn list_files() -> Vec<(String, u32)> {
                 }
             }
         } else if crate::gpt::is_gpt_installed() {
-            // Read root directory sectors directly from the physical disk partition (LBA 2048+)
-            let mut bpb_sec = [0u8; 512];
-            if crate::gpt::read_disk_sector(crate::gpt::HUSEYNOS_PART_START_LBA, &mut bpb_sec) {
-                let bpb = unsafe { &*(bpb_sec.as_ptr() as *const BootSector) };
-                let bytes_per_sec = {bpb.bytes_per_sector} as u64;
-                if bytes_per_sec == 512 {
-                    let reserved_secs = {bpb.reserved_sectors} as u64;
-                    let num_fats = {bpb.num_fats} as u64;
-                    let root_entries = {bpb.root_entries} as usize;
-                    let secs_per_fat = {bpb.sectors_per_fat_16} as u64;
-
-                    let root_dir_lba = crate::gpt::HUSEYNOS_PART_START_LBA + reserved_secs + (num_fats * secs_per_fat);
-                    let mut dir_sec = [0u8; 512];
-                    let entries_per_sec = 512 / 32;
-
-                    for i in 0..root_entries {
-                        let sec_idx = i / entries_per_sec;
-                        let entry_in_sec = i % entries_per_sec;
-
-                        if entry_in_sec == 0 {
-                            if !crate::gpt::read_disk_sector(root_dir_lba + sec_idx as u64, &mut dir_sec) {
-                                break;
-                            }
-                        }
-
-                        let entry = unsafe { &*((dir_sec.as_ptr().add(entry_in_sec * 32)) as *const DirEntry) };
-                        if entry.name[0] == 0x00 { break; }
-                        if entry.name[0] == 0xE5 { continue; }
-                        if entry.attr & 0x08 != 0 || entry.attr & 0x10 != 0 { continue; }
-
-                        let mut name_buf = [0u8; 11];
-                        name_buf.copy_from_slice(&{entry.name});
-                        let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
-                        let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
-                        let full_name = if ext.is_empty() {
-                            String::from(base)
-                        } else {
-                            let mut s = String::from(base);
-                            s.push('.');
-                            s.push_str(ext);
-                            s
-                        };
-
-                        if !deleted.iter().any(|d| *d == full_name) {
-                            files.push((full_name, {entry.file_size}));
-                        }
-                    }
+            for (f, sz) in list_files_from_disk_partition() {
+                if !deleted.iter().any(|d| *d == f) {
+                    files.push((f, sz));
                 }
             }
         }
@@ -366,7 +460,7 @@ pub fn list_files() -> Vec<(String, u32)> {
     files
 }
 
-/// Read a file directly from the physical disk sectors (AHCI DMA or ATA PIO) at LBA 2048+.
+/// Read a file directly from the physical disk partition (LBA 2048+).
 fn read_file_from_physical_disk(search_name: &str) -> Option<Vec<u8>> {
     if !crate::gpt::has_physical_disk() {
         return None;
@@ -394,27 +488,27 @@ fn read_file_from_physical_disk(search_name: &str) -> Option<Vec<u8>> {
     let first_data_lba = root_dir_lba + root_dir_sectors as u64;
 
     let mut dir_sec = [0u8; 512];
-    let entries_per_sec = 512 / 32;
 
     for i in 0..root_entries {
-        let sec_idx = i / entries_per_sec;
-        let entry_in_sec = i % entries_per_sec;
+        let sec_idx = (i / 16) as u64;
+        let entry_idx = i % 16;
 
-        if entry_in_sec == 0 {
-            if !crate::gpt::read_disk_sector(root_dir_lba + sec_idx as u64, &mut dir_sec) {
+        if entry_idx == 0 {
+            if !crate::gpt::read_disk_sector(root_dir_lba + sec_idx, &mut dir_sec) {
                 break;
             }
         }
 
-        let entry = unsafe { &*((dir_sec.as_ptr().add(entry_in_sec * 32)) as *const DirEntry) };
+        let entry = unsafe { &*((dir_sec.as_ptr().add(entry_idx * 32)) as *const DirEntry) };
         if entry.name[0] == 0x00 { break; }
-        if entry.name[0] == 0xE5 { continue; }
-        if entry.attr & 0x08 != 0 || entry.attr & 0x10 != 0 { continue; }
+        if entry.name[0] == 0xE5 || (entry.attr & 0x08 != 0) || (entry.attr & 0x10 != 0) {
+            continue;
+        }
 
         let mut name_buf = [0u8; 11];
         name_buf.copy_from_slice(&{entry.name});
-        let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
-        let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
+        let base = core::str::from_utf8(&name_buf[..8]).unwrap_or("").trim();
+        let ext = core::str::from_utf8(&name_buf[8..11]).unwrap_or("").trim();
         let full_name = if ext.is_empty() {
             String::from(base)
         } else {
@@ -449,7 +543,7 @@ fn read_file_from_physical_disk(search_name: &str) -> Option<Vec<u8>> {
     None
 }
 
-/// Read a file by name from the overlay store, Live RAM volume, or directly from physical disk sectors.
+/// Read a file by name from the overlay store, Live RAM volume, or physical disk partition.
 pub fn read_file(filename: &str) -> Option<Vec<u8>> {
     let search_name = filename.to_uppercase();
 
@@ -467,11 +561,9 @@ pub fn read_file(filename: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // 1. Try Live RAM volume if present
     unsafe {
         if !FS_BASE.is_null() {
             let bpb = &*(FS_BASE as *const BootSector);
-
             let bytes_per_sector = {bpb.bytes_per_sector} as usize;
             let sectors_per_cluster = {bpb.sectors_per_cluster} as usize;
             let reserved_sectors = {bpb.reserved_sectors} as usize;
@@ -489,13 +581,12 @@ pub fn read_file(filename: &str) -> Option<Vec<u8>> {
             for i in 0..root_entries {
                 let entry = &*root_dir_ptr.add(i);
                 if entry.name[0] == 0x00 { break; }
-                if entry.name[0] == 0xE5 { continue; }
-                if entry.attr & 0x08 != 0 { continue; }
-                if entry.attr & 0x10 != 0 { continue; }
+                if entry.name[0] == 0xE5 || (entry.attr & 0x08 != 0) || (entry.attr & 0x10 != 0) {
+                    continue;
+                }
 
                 let mut name_buf = [0u8; 11];
                 name_buf.copy_from_slice(&{entry.name});
-
                 let base = core::str::from_utf8_unchecked(&name_buf[..8]).trim();
                 let ext = core::str::from_utf8_unchecked(&name_buf[8..11]).trim();
                 let full_name = if ext.is_empty() {
@@ -524,6 +615,5 @@ pub fn read_file(filename: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // 2. If not found in RAM or booting directly from physical disk without RAM module, read sectors from disk
     read_file_from_physical_disk(&search_name)
 }

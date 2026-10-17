@@ -13,6 +13,7 @@ mod gpt;
 mod idt;
 mod ipc;
 mod memory;
+mod nvme;
 mod pic;
 mod pit;
 mod pci;
@@ -128,7 +129,10 @@ unsafe extern "C" fn kmain() -> ! {
         xhci::init(bar0);
     }
 
-    // 12. Hardware Block Storage (AHCI SATA 3.0 DMA + ATA/PIO + GPT/FAT Volume)
+    // 12. Storage Hardware: NVMe M.2 SSD, AHCI SATA 3.0 DMA, ATA/PIO, and GPT/FAT Volume
+    if let Some(bar0) = pci::find_nvme_bar0() {
+        nvme::init(bar0);
+    }
     if let Some(bar5) = pci::find_ahci_bar5() {
         ahci::init(bar5);
     }
